@@ -22,7 +22,7 @@ two-face = { version = "0.5.2", default-features = false, features = ["syntect-f
 syntect = { version = "5.3.0", default-features = false, features = ["plist-load"] }
 # Draws the window icon from assets/app-icon/icon.svg. iced already uses this version
 # (with its default features) to draw SVGs, so nothing new is compiled.
-resvg = "0.45.1"
+resvg = "0.50.0"
 
 [build-dependencies]
 # Builds the app icon into the Windows .exe (see build.rs).

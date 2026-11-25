@@ -4,7 +4,7 @@
 
 ## How I tested it
 
-<!-- Steps you took, and on which OS (Windows / macOS). For UI changes, a screenshot helps. -->
+<!-- Steps you took, and on which OS (Windows / macOS / Linux). For UI changes, a screenshot helps. -->
 
 ## Checklist
 

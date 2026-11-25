@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Git Reviewer
+Comment=Review and commit changes across many git repos and worktrees
+Exec=git-reviewer
+Icon=io.github.towers77.git-reviewer
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;diff;commit;worktree;review;
+StartupWMClass=io.github.towers77.git-reviewer

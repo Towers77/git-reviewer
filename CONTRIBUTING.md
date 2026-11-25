@@ -42,8 +42,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-CI also builds the app for Windows and macOS on every pull request. The builds are
-attached to the CI run if you want to try them.
+CI also builds the app for Windows, macOS and Linux on every pull request. The builds
+are attached to the CI run if you want to try them.
 
 ### Code guidelines
 

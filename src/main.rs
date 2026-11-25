@@ -27,6 +27,14 @@ fn main() -> iced::Result {
         .window(window::Settings {
             min_size: Some(Size::new(min_window_width(), 0.0)),
             icon: Some(window_icon()),
+            // Linux docks and taskbars match a window to its launcher by this id (the
+            // Wayland app id, the X11 WM_CLASS): it's the name of the .desktop file in
+            // assets/linux/. Without it they show a generic icon and a second entry.
+            #[cfg(target_os = "linux")]
+            platform_specific: window::settings::PlatformSpecific {
+                application_id: "io.github.towers77.git-reviewer".to_string(),
+                ..Default::default()
+            },
             ..window::Settings::default()
         })
         // Inter: the UI font where there's no system one we target (see theme::fonts).
@@ -37,8 +45,9 @@ fn main() -> iced::Result {
         .run()
 }
 
-/// The icon in the window's title bar and taskbar button (on Windows; macOS takes the
-/// Dock icon from the .app). Drawn from the same SVG the .exe and .app icons come from.
+/// The icon in the window's title bar and taskbar button (on Windows and X11; macOS takes
+/// the Dock icon from the .app, Wayland from the .desktop file). Drawn from the same SVG
+/// the .exe and .app icons come from.
 fn window_icon() -> window::Icon {
     use resvg::{tiny_skia, usvg};
 

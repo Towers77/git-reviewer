@@ -1,8 +1,8 @@
 # Publishes a release whenever main moves, which only happens by merging a
 # development → main PR (release-check.yml made sure it bumped the version):
 #   1. read the version from Cargo.toml and stop if its v<version> tag already exists;
-#   2. build Windows and macOS from scratch (build.yml, no cache);
-#   3. create the tag on the merged commit and a GitHub Release with both files.
+#   2. build Windows, macOS and Linux from scratch (build.yml, no cache);
+#   3. create the tag on the merged commit and a GitHub Release with the three files.
 # Nothing commits to main. Only the last job can write to the repo.
 
 name: Release
@@ -79,8 +79,8 @@ jobs:
         run: |
           mapfile -t files < <(find dist -type f | sort)
           printf 'Attaching %s\n' "${files[@]}"
-          if [ "${#files[@]}" -ne 2 ]; then
-            echo "::error::Expected 2 files (Windows .exe, macOS .zip), found ${#files[@]}."
+          if [ "${#files[@]}" -ne 3 ]; then
+            echo "::error::Expected 3 files (Windows .exe, macOS .zip, Linux .tar.gz), found ${#files[@]}."
             exit 1
           fi
           # With a tag that doesn't exist yet, gh creates it at --target: the commit

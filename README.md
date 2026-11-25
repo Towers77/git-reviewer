@@ -5,7 +5,8 @@ their worktrees, in a single window. It's modeled on VS Code's Source Control pa
 people whose work spans several repos at once, without keeping an editor window open for
 each one.
 
-Runs on Windows and macOS (Apple silicon). Built in Rust with [iced](https://iced.rs).
+Runs on Windows, macOS (Apple silicon) and Linux (x64). Built in Rust with
+[iced](https://iced.rs).
 
 ## Features
 
@@ -35,6 +36,7 @@ Download the latest version from the
 | --------------------- | --------------------------------------- |
 | macOS (Apple silicon) | `git-reviewer-<version>-macos-arm64.zip` |
 | Windows (x64)         | `git-reviewer-<version>-windows-x64.exe` |
+| Linux (x64)           | `git-reviewer-<version>-linux-x64.tar.gz` |
 
 You need [git](https://git-scm.com) installed and on your `PATH`. On macOS, the git that
 comes with Xcode's command-line tools works.
@@ -46,6 +48,20 @@ The builds aren't code-signed, so each OS warns you the first time:
   click **Open Anyway** and confirm. Each new version asks once more.
 - **Windows:** run the `.exe`. If SmartScreen says "Windows protected your PC", click
   **More info → Run anyway**.
+
+On **Linux**, extract it and run its install script, which puts **Git Reviewer** in your
+app menu (the files go in `~/.local`):
+
+```sh
+tar -xzf git-reviewer-<version>-linux-x64.tar.gz
+./git-reviewer-<version>-linux-x64/install.sh
+```
+
+`install.sh --uninstall` removes it again. Or skip the script and run `bin/git-reviewer`
+from the extracted folder. It needs glibc 2.35
+or newer (Ubuntu 22.04, Debian 12, Fedora 36 or later). **Choose folder…** opens your
+desktop's folder picker through xdg-desktop-portal, which GNOME, KDE, Cinnamon and most
+other desktops come with.
 
 To update, quit the app and replace it with the new download. Your settings are kept.
 
@@ -65,6 +81,7 @@ Settings live in `config.toml`:
 | ------- | ------------------------------------------ |
 | Windows | `%APPDATA%\git-reviewer\`                  |
 | macOS   | `~/Library/Application Support/git-reviewer/` |
+| Linux   | `~/.config/git-reviewer/`                  |
 
 ```toml
 root = "C:\\Users\\me\\repos"     # the folder whose repos the app shows
@@ -90,8 +107,8 @@ cd git-reviewer
 cargo run --release -- ~/repos
 ```
 
-Linux may work too (the config goes in `~/.config/git-reviewer/`), but it isn't built or
-tested.
+On Linux, no libraries beyond a C linker are needed to build: X11, Wayland and the GPU
+drivers are loaded when the app starts.
 
 ## Contributing
 

@@ -22,5 +22,5 @@ untracked folders, …), describe how to set that state up. -->
 ## Environment
 
 - Git Reviewer version:
-- OS and version (e.g. Windows 11, macOS 15 on Apple silicon):
+- OS and version (e.g. Windows 11, macOS 15 on Apple silicon, Ubuntu 24.04 on Wayland):
 - `git --version`:

@@ -1,5 +1,5 @@
-# Builds the app for Windows (.exe) and macOS on Apple silicon (a zipped .app) and
-# uploads each file as an artifact of the run.
+# Builds the app for Windows (.exe), macOS on Apple silicon (a zipped .app) and Linux
+# x64 (a .tar.gz) and uploads each file as an artifact of the run.
 #
 # Reusable: it only runs when another workflow calls it (`uses:`), so CI (ci.yml) and
 # releases (release.yml) share exactly this build. release.yml collects the files with
@@ -38,6 +38,12 @@ jobs:
           - os: macos-15
             target: aarch64-apple-darwin
             platform: macos-arm64
+          # The oldest Ubuntu runner: a binary runs only on a glibc at least as new as
+          # the one it was built against, so building here (glibc 2.35) covers Ubuntu
+          # 22.04, Debian 12, Fedora 36 and anything newer.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
     env:
       TARGET: ${{ matrix.target }}
       PLATFORM: ${{ matrix.platform }}
@@ -130,6 +136,24 @@ jobs:
           # artifact upload wouldn't.
           ditto -c -k --keepParent "$app" "dist/git-reviewer-$VERSION-$PLATFORM.zip"
           rm -rf "$app"
+
+      # One folder laid out like ~/.local: the binary in bin/, and in share/ the launcher
+      # entry and its icon, named after the app id set in main.rs. Its install.sh
+      # copies them into ~/.local; without it, bin/git-reviewer runs from the folder.
+      # tar keeps the executable bits.
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          id=io.github.towers77.git-reviewer
+          dir="git-reviewer-$VERSION-$PLATFORM"
+          install -Dm755 "target/$TARGET/release/git-reviewer" "$dir/bin/git-reviewer"
+          install -Dm644 "assets/linux/$id.desktop" "$dir/share/applications/$id.desktop"
+          install -Dm644 assets/app-icon/icon.svg "$dir/share/icons/hicolor/scalable/apps/$id.svg"
+          install -Dm755 assets/linux/install.sh "$dir/install.sh"
+
+          mkdir dist
+          tar -czf "dist/$dir.tar.gz" "$dir"
+          rm -rf "$dir"
 
       - name: Find the file to upload
         run: |

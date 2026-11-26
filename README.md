@@ -132,4 +132,4 @@ Bundled assets keep their own licenses:
 - the Fira Code and Inter fonts: SIL Open Font License, in `assets/fonts/`;
 - the Lucide icons: ISC, in `assets/icons/Lucide-LICENSE.txt`;
 - the Catppuccin file icons: MIT, in `assets/icons/files/LICENSE`;
-- the Catppuccin Mocha syntax theme: MIT, in `assets/themes/Catppuccin-MIT.txt`.
+- the Catppuccin Mocha and Latte syntax themes: MIT, in `assets/themes/Catppuccin-MIT.txt`.

@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
-use crate::highlight::LineColors;
+use crate::highlight::{Flavor, LineColors};
 use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
@@ -522,8 +522,9 @@ impl App {
 
         // Many messages can load a diff (opening a file, staging, a refresh...), so a
         // new one's highlighting is started here, after any of them.
+        let flavor = Flavor::for_background(self.colors.light);
         match &mut self.diff {
-            Some(Ok(diff)) => match diff.start_highlighting() {
+            Some(Ok(diff)) => match diff.start_highlighting(flavor) {
                 Some(highlighting) => Task::batch([task, highlighting]),
                 None => task,
             },

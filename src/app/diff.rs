@@ -23,7 +23,7 @@ use iced_palace::widget::ellipsized_text;
 use super::sticky::sticky;
 use super::{App, Message, empty_state, on_thread};
 use crate::git::{Diff, DiffLine, DiffSource};
-use crate::highlight::{self, LineColors};
+use crate::highlight::{self, Flavor, LineColors};
 use crate::theme::icons::{self, icon};
 use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
 
@@ -273,14 +273,14 @@ impl DiffView {
         self.next = Some(Box::new(next));
     }
 
-    /// The task that works out the code's syntax colors, on a thread of its own (see
-    /// `on_thread`), since that can take a while (up to 0.7 s for both sides of a
-    /// 5000-line file). `None` if there's nothing to start: it's already been started,
-    /// or it's not a language we highlight. The result comes back as
+    /// The task that works out the code's syntax colors in `flavor`'s theme, on a thread
+    /// of its own (see `on_thread`), since that can take a while (up to 0.7 s for both
+    /// sides of a 5000-line file). `None` if there's nothing to start: it's already been
+    /// started, or it's not a language we highlight. The result comes back as
     /// `Message::DiffHighlighted`.
-    pub(super) fn start_highlighting(&mut self) -> Option<Task<Message>> {
+    pub(super) fn start_highlighting(&mut self, flavor: Flavor) -> Option<Task<Message>> {
         if let Some(next) = &mut self.next {
-            return next.start_highlighting();
+            return next.start_highlighting(flavor);
         }
         if self.highlighting != Highlighting::NotStarted {
             return None;
@@ -288,7 +288,7 @@ impl DiffView {
         self.highlighting = Highlighting::Running;
 
         let (path, diff) = (self.path.clone(), Arc::clone(&self.diff));
-        let work = move || highlight::diff_colors(&path, &diff);
+        let work = move || highlight::diff_colors(&path, &diff, flavor);
         let diff = Arc::clone(&self.diff);
         // A panicked thread leaves the code in the default text color.
         let done =
@@ -904,8 +904,8 @@ mod tests {
         assert!(!view.shows("main.rs", DiffSource::Unstaged, &diff()));
         assert!(!view.shows("lib.rs", DiffSource::Staged, &diff()));
         assert!(!view.shows("main.rs", DiffSource::Staged, &rust_diff("")));
-        assert!(view.start_highlighting().is_some());
-        assert!(view.start_highlighting().is_none());
+        assert!(view.start_highlighting(Flavor::Mocha).is_some());
+        assert!(view.start_highlighting(Flavor::Mocha).is_none());
         assert!(view.is_loading());
     }
 
@@ -928,7 +928,7 @@ mod tests {
         let mut view = DiffView::new("notes.txt", DiffSource::Unstaged, rust_diff("plain"));
 
         assert!(!view.is_loading());
-        assert!(view.start_highlighting().is_none());
+        assert!(view.start_highlighting(Flavor::Mocha).is_none());
     }
 
     #[test]
@@ -944,7 +944,7 @@ mod tests {
         assert!(Arc::ptr_eq(&view.diff, &old));
         assert!(view.shows("main.rs", source, &rust_diff("fn new() {}")));
         // Highlighting starts for the new version.
-        assert!(view.start_highlighting().is_some());
+        assert!(view.start_highlighting(Flavor::Mocha).is_some());
 
         // Stale colors (for the old version) change nothing.
         view.set_colors(&old, None);

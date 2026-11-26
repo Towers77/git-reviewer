@@ -16,7 +16,10 @@ Runs on Windows, macOS (Apple silicon) and Linux (x64). Built in Rust with
 - **Changes like in VS Code:** staged and unstaged changes, stage or unstage per file,
   discard with a confirmation, and commit with `Ctrl+Enter` (`⌘+Enter` on macOS).
 - **Whole-file diffs** with the changes inline, a line-number gutter that stays in place
-  when you scroll sideways, and syntax highlighting (Catppuccin Mocha colors).
+  when you scroll sideways, and syntax highlighting in Catppuccin's colors.
+- **Themes:** a neutral dark theme by default, or Catppuccin's flavors. The palette button
+  in the top bar picks a preset, any background and text color, and the accent; every
+  other shade follows them.
 - **Remote work:** fetch all repos, sync, and publish a branch. Remove a worktree, or delete
   a branch once it's fully merged into its base.
 - **Auto-refresh:** files are watched, so changes made in an editor or the terminal show

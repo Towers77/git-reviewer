@@ -1,7 +1,7 @@
 use iced::{
     Border, Color, Shadow, Theme, Vector,
     theme::Palette,
-    widget::{Row, button, container, rule, scrollable, text, text_editor},
+    widget::{Row, button, container, rule, scrollable, text, text_editor, text_input},
 };
 
 pub mod palette;
@@ -71,6 +71,14 @@ pub mod layouts {
     pub const SWATCH_GAP: f32 = 4.0;
     /// The repo menu's Archive item.
     pub const MENU_ITEM_HEIGHT: f32 = 30.0;
+    /// The theme menu: wide enough for "Macchiato" on its preset button, one of five.
+    pub const THEME_MENU_WIDTH: f32 = 372.0;
+    pub const PRESET_HEIGHT: f32 = 34.0;
+    /// The square showing a hex field's color, beside it.
+    pub const COLOR_BOX: f32 = 20.0;
+    /// The Custom accent's label, and its hex field.
+    pub const CUSTOM_LABEL_WIDTH: f32 = 70.0;
+    pub const CUSTOM_HEX_WIDTH: f32 = 110.0;
     /// File rows and section headers in the changes list.
     pub const LIST_ROW_HEIGHT: f32 = 32.0;
     /// Catppuccin's file icons are drawn on a 16px grid; any other size blurs their
@@ -164,6 +172,7 @@ pub mod icons {
     /// A repo's main worktree, like VS Code's repository icon.
     pub const BOOK_CHECK: &[u8] = include_bytes!("../assets/icons/book-check.svg");
     pub const ELLIPSIS: &[u8] = include_bytes!("../assets/icons/ellipsis.svg");
+    pub const PALETTE: &[u8] = include_bytes!("../assets/icons/palette.svg");
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
     pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
@@ -449,6 +458,98 @@ pub fn icon_button(
             button::Status::Hovered | button::Status::Pressed => base.with_background(hover),
             button::Status::Disabled => dimmed(base),
         }
+    }
+}
+
+/// A borderless button in `text`'s color that only shows a background on hover, or
+/// all along while its menu is `open`: the top bar's theme button, the menu's Reset.
+pub fn ghost_button(
+    c: &Colors,
+    text: Color,
+    open: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let hover = c.hover;
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: (open || hovered).then_some(hover.into()),
+            text_color: text,
+            border: Border {
+                radius: radii::CONTROL.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A theme preset in the theme menu: drawn in its own colors, with a ring in the
+/// current text color while it's the one in use.
+pub fn preset_button(
+    c: &Colors,
+    background: Color,
+    text: Color,
+    picked: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (line, ring, hover_ring) = (c.control_border, c.text, c.text_dim);
+    move |_, status| {
+        let (color, width) = match status {
+            _ if picked => (ring, 2.0),
+            button::Status::Hovered | button::Status::Pressed => (hover_ring, 1.0),
+            _ => (line, 1.0),
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color: text,
+            border: Border {
+                color,
+                width,
+                radius: radii::CONTROL.into(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// The theme menu's hex fields: like the commit box, small, and with a red outline
+/// while what's typed isn't a color yet.
+pub fn hex_input(
+    c: &Colors,
+    valid: bool,
+) -> impl Fn(&Theme, text_input::Status) -> text_input::Style + use<> {
+    let c = *c;
+    move |_, status| {
+        let border = match status {
+            _ if !valid => c.danger,
+            text_input::Status::Focused { .. } => c.accent,
+            _ => c.control_border,
+        };
+        text_input::Style {
+            background: c.background.into(),
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: radii::TAG.into(),
+            },
+            icon: c.text_muted,
+            placeholder: c.text_dim,
+            value: c.text,
+            selection: c.accent.scale_alpha(0.4),
+        }
+    }
+}
+
+/// A small square showing a color, outlined so it shows on a background like its own.
+pub fn color_box(c: &Colors, color: Color) -> impl Fn(&Theme) -> container::Style + use<> {
+    let border = c.control_border;
+    move |_| container::Style {
+        background: Some(color.into()),
+        border: Border {
+            color: border,
+            width: 1.0,
+            radius: radii::TAG.into(),
+        },
+        ..container::Style::default()
     }
 }
 

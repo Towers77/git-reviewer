@@ -253,7 +253,7 @@ impl From<AccentChoice> for String {
     }
 }
 
-/// The three colors the user picks; `Colors::new` works out the rest. Catppuccin Mocha
+/// The three colors the user picks; `Colors::new` works out the rest. The Neutral preset
 /// with mauve until changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -265,13 +265,52 @@ pub struct ThemeSettings {
 
 impl Default for ThemeSettings {
     fn default() -> ThemeSettings {
+        let neutral = PRESETS[0];
         ThemeSettings {
-            background: Rgb(0x1e, 0x1e, 0x2e),
-            text: Rgb(0xcd, 0xd6, 0xf4),
+            background: neutral.background,
+            text: neutral.text,
             accent: AccentChoice::Named(Accent::Mauve),
         }
     }
 }
+
+/// A background and the text color made for it, picked together in the theme menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preset {
+    pub name: &'static str,
+    pub background: Rgb,
+    pub text: Rgb,
+}
+
+/// Darkest first: Neutral (the app's colors from before themes, and the default), then
+/// Catppuccin's four flavors.
+pub const PRESETS: [Preset; 5] = [
+    Preset {
+        name: "Neutral",
+        background: Rgb(0x18, 0x19, 0x1c),
+        text: Rgb(0xe6, 0xe6, 0xe9),
+    },
+    Preset {
+        name: "Mocha",
+        background: Rgb(0x1e, 0x1e, 0x2e),
+        text: Rgb(0xcd, 0xd6, 0xf4),
+    },
+    Preset {
+        name: "Macchiato",
+        background: Rgb(0x24, 0x27, 0x3a),
+        text: Rgb(0xca, 0xd3, 0xf5),
+    },
+    Preset {
+        name: "Frappé",
+        background: Rgb(0x30, 0x34, 0x46),
+        text: Rgb(0xc6, 0xd0, 0xf5),
+    },
+    Preset {
+        name: "Latte",
+        background: Rgb(0xef, 0xf1, 0xf5),
+        text: Rgb(0x4c, 0x4f, 0x69),
+    },
+];
 
 /// Above this luminance a background counts as light: the accents switch to Latte's
 /// and the darker panels mix toward the text instead of black.
@@ -414,6 +453,15 @@ impl Colors {
     pub fn named(&self, accent: Accent) -> Color {
         accent.resolve(self.light).color()
     }
+
+    /// The accent `choice` stands for on this theme's background, as a hex code: what
+    /// the theme menu's Custom field starts from.
+    pub fn accent_hex(&self, choice: AccentChoice) -> Rgb {
+        match choice {
+            AccentChoice::Named(accent) => accent.resolve(self.light),
+            AccentChoice::Custom(rgb) => rgb,
+        }
+    }
 }
 
 impl Default for Colors {
@@ -454,10 +502,10 @@ mod tests {
 
     #[test]
     fn test_light_background_uses_latte_accents() {
-        let mocha = Colors::default();
-        assert!(!mocha.light);
-        assert_eq!(mocha.added, Accent::Green.mocha().color());
-        assert_eq!(mocha.named(Accent::Teal), Accent::Teal.mocha().color());
+        let dark = Colors::default();
+        assert!(!dark.light);
+        assert_eq!(dark.added, Accent::Green.mocha().color());
+        assert_eq!(dark.named(Accent::Teal), Accent::Teal.mocha().color());
 
         let latte = Colors::new(&ThemeSettings {
             background: Rgb(0xef, 0xf1, 0xf5),
@@ -490,8 +538,13 @@ mod tests {
 
     #[test]
     fn test_text_on_accent_contrasts() {
-        // Mocha's pastel mauve carries dark text; Latte's deep mauve carries white.
-        assert_eq!(Colors::default().on_accent, Rgb(0x11, 0x11, 0x1b).color());
+        // Mocha's pastel mauve carries dark text (the default theme's top bar color);
+        // Latte's deep mauve carries white.
+        let neutral = PRESETS[0].background;
+        assert_eq!(
+            Colors::default().on_accent,
+            neutral.mix(Rgb::BLACK, 0.42).color()
+        );
         let latte = Colors::new(&ThemeSettings {
             background: Rgb(0xef, 0xf1, 0xf5),
             ..ThemeSettings::default()

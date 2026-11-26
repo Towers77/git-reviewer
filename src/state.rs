@@ -15,8 +15,8 @@
 //! 'C:\repos\web-app' = "Teal"
 //!
 //! [theme]           # the three picked colors; every other shade is worked out from them
-//! background = "#1e1e2e"
-//! text = "#cdd6f4"
+//! background = "#18191c"
+//! text = "#e6e6e9"
 //! accent = "Mauve"  # a Catppuccin accent by name, or a hex code
 //! ```
 //!

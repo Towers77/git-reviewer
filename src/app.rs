@@ -9,6 +9,7 @@ mod panels;
 mod popup;
 mod sidebar;
 mod sticky;
+mod theme_menu;
 mod watch;
 
 use std::collections::{BTreeSet, HashSet};
@@ -39,6 +40,7 @@ use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
 use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
+use theme_menu::{ThemeDrafts, ThemeEdit};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -102,8 +104,12 @@ pub enum Message {
     ArchiveRepo(PathBuf),
     /// A repo's ⋯ button was clicked, with the repo's folder: open its menu, or close it.
     RepoMenuToggled(PathBuf),
+    /// The top bar's theme button was clicked: open the theme menu, or close it.
+    ThemeMenuToggled,
     /// The open menu was closed by a click outside it or Escape (see `popup`).
     MenuDismissed,
+    /// A change in the theme menu.
+    Theme(ThemeEdit),
     /// A color was picked in a repo's menu, for its badge.
     RepoColorPicked(PathBuf, Accent),
     /// An archived repo's unarchive button was clicked, with the repo's folder.
@@ -124,6 +130,15 @@ pub enum Message {
     DividerReleased,
     /// The window's new width.
     WindowResized(f32),
+}
+
+/// A dropdown menu (see `popup`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenMenu {
+    /// A repo's ⋯ menu in the sidebar, by the repo's folder.
+    Repo(PathBuf),
+    /// The top bar's theme menu.
+    Theme,
 }
 
 /// A list section that folds away when its header is clicked, like VS Code's.
@@ -280,8 +295,11 @@ pub struct App {
     /// The repo whose sidebar header is under the cursor, by folder: it shows its archive
     /// button in place of its worktree count.
     hovered_repo: Option<PathBuf>,
-    /// The repo whose ⋯ menu is open, by folder.
-    repo_menu: Option<PathBuf>,
+    /// The dropdown that's open, if any: one at a time.
+    menu: Option<OpenMenu>,
+    /// What the theme menu's hex fields show: what's typed, which may not be a color
+    /// yet. Set from the theme whenever the menu opens or a pick changes it.
+    theme_drafts: ThemeDrafts,
     /// What's remembered between runs in `state.toml`: the panel widths the user dragged
     /// to (what's shown may be narrower: see `PanelWidths::fitted`).
     state: State,
@@ -368,7 +386,8 @@ impl App {
             reported_base_error: None,
             collapsed: HashSet::new(),
             hovered_repo: None,
-            repo_menu: None,
+            menu: None,
+            theme_drafts: ThemeDrafts::default(),
             state,
             dragging: None,
             window_width: f32::INFINITY,
@@ -493,7 +512,9 @@ impl App {
     fn scan_now(&mut self) {
         self.workspace = scan_root(self.root.as_deref(), &self.state.sidebar.archived);
         self.workspace_version += 1;
-        self.repo_menu = None;
+        if matches!(self.menu, Some(OpenMenu::Repo(_))) {
+            self.menu = None;
+        }
     }
 
     /// Drops the result of a rescan that's running, and queues a fresh one: for changes
@@ -571,16 +592,15 @@ impl App {
                     // `workspace_version`).
                     Some(Scanned { version, workspace }) if version == self.workspace_version => {
                         self.workspace = Arc::unwrap_or_clone(workspace);
-                        // A menu stays open only on a repo that's still there; else it
-                        // would open by itself if the repo came back.
-                        let menu_repo_kept = self.workspace.as_ref().is_ok_and(|workspace| {
-                            workspace
-                                .repos()
-                                .iter()
-                                .any(|repo| Some(repo.path()) == self.repo_menu.as_deref())
-                        });
-                        if !menu_repo_kept {
-                            self.repo_menu = None;
+                        // A repo's menu stays open only while the repo is still there;
+                        // else it would open by itself if the repo came back.
+                        if let Some(OpenMenu::Repo(open)) = &self.menu {
+                            let kept = self.workspace.as_ref().is_ok_and(|workspace| {
+                                workspace.repos().iter().any(|repo| repo.path() == open)
+                            });
+                            if !kept {
+                                self.menu = None;
+                            }
                         }
                         // The selected worktree may be gone (removed outside the app).
                         let task = if self.selected_worktree().is_none() {
@@ -848,7 +868,7 @@ impl App {
                 if self.hovered_repo.as_ref() == Some(&repo) {
                     self.hovered_repo = None;
                 }
-                self.repo_menu = None;
+                self.menu = None;
                 self.state.sidebar.archived.insert(repo);
                 self.save_state("the archived repos");
                 return task;
@@ -878,14 +898,10 @@ impl App {
                     self.hovered_repo = None;
                 }
             }
-            Message::RepoMenuToggled(repo) => {
-                self.repo_menu = if self.repo_menu.as_ref() == Some(&repo) {
-                    None
-                } else {
-                    Some(repo)
-                };
-            }
-            Message::MenuDismissed => self.repo_menu = None,
+            Message::RepoMenuToggled(repo) => self.toggle_menu(OpenMenu::Repo(repo)),
+            Message::ThemeMenuToggled => self.toggle_menu(OpenMenu::Theme),
+            Message::MenuDismissed => self.menu = None,
+            Message::Theme(edit) => self.edit_theme(edit),
             // The menu stays open, so the new pick shows in its swatches.
             Message::RepoColorPicked(repo, color) => {
                 self.state.sidebar.repo_colors.insert(repo, color);
@@ -1126,6 +1142,7 @@ impl App {
                 .padding([4.0, 8.0])
                 .style(theme::list_row(c, false)),
                 space().width(Fill),
+                self.theme_button(),
                 bar_button(icons::DOWNLOAD, "Fetch all", Message::FetchAll),
                 bar_button(icons::ROTATE_CW, "Refresh", Message::Refresh),
             ]

@@ -14,7 +14,7 @@ use iced_palace::widget::ellipsized_text;
 
 use super::changes::sized_icon_button;
 use super::popup::popup;
-use super::{App, Message, Section};
+use super::{App, Message, OpenMenu, Section};
 use crate::git::{Repo, Workspace, Worktree};
 use crate::theme::icons::{self, chevron, icon};
 use crate::theme::palette::Accent;
@@ -154,7 +154,8 @@ impl App {
         let c = &self.colors;
         let path = repo.path().to_path_buf();
         let open = self.is_open(&Section::Repo(repo.name().to_string()));
-        let menu_open = self.repo_menu.as_deref() == Some(repo.path());
+        let menu_open =
+            matches!(&self.menu, Some(OpenMenu::Repo(open)) if open.as_path() == repo.path());
         let hovered = self.hovered_repo.as_deref() == Some(repo.path());
 
         // A click on the ⋯ button doesn't also fold the repo: iced's button skips a click
@@ -233,23 +234,13 @@ impl App {
         let c = &self.colors;
         let picked = self.repo_color(repo.path());
 
-        let swatch = |accent: Accent| -> Element<'a, Message> {
-            let dot = container(space())
-                .width(Fill)
-                .height(Fill)
-                .style(theme::dot(c.named(accent)));
-            button(dot)
-                .on_press(Message::RepoColorPicked(repo.path().to_path_buf(), accent))
-                .width(layouts::SWATCH)
-                .height(layouts::SWATCH)
-                .padding(4)
-                .style(theme::swatch(c, accent == picked))
-                .into()
-        };
         let swatches = Accent::REPO.chunks(SWATCH_COLUMNS).map(|line| {
-            row(line.iter().map(|accent| swatch(*accent)))
-                .spacing(layouts::SWATCH_GAP)
-                .into()
+            row(line.iter().map(|accent| {
+                let pick = Message::RepoColorPicked(repo.path().to_path_buf(), *accent);
+                swatch(c, c.named(*accent), *accent == picked, pick)
+            }))
+            .spacing(layouts::SWATCH_GAP)
+            .into()
         });
 
         let archive = button(
@@ -295,8 +286,28 @@ impl App {
     }
 }
 
-/// The swatches per line in the repo menu: 13 colors in two lines.
-const SWATCH_COLUMNS: usize = 7;
+/// The swatches per line in the repo and theme menus: 13 or 14 colors in two lines.
+pub(super) const SWATCH_COLUMNS: usize = 7;
+
+/// A color to pick in a menu: a dot of `color`, ringed while it's the `picked` one.
+pub(super) fn swatch<'a>(
+    c: &Colors,
+    color: Color,
+    picked: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    let dot = container(space())
+        .width(Fill)
+        .height(Fill)
+        .style(theme::dot(color));
+    button(dot)
+        .on_press(on_press)
+        .width(layouts::SWATCH)
+        .height(layouts::SWATCH)
+        .padding(4)
+        .style(theme::swatch(c, picked))
+        .into()
+}
 
 /// A repo's color until one is picked: one of `Accent::REPO`, from a hash of its folder.
 /// That looks random from repo to repo but is the same on every run, so it needn't be

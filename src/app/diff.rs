@@ -273,6 +273,18 @@ impl DiffView {
         self.next = Some(Box::new(next));
     }
 
+    /// Colors the code again, after the theme went between dark and light: a fresh copy
+    /// of the newest version waits to replace this one (see `replace_when_highlighted`),
+    /// so the code stays on screen, in its old colors, until the new ones are in.
+    pub(super) fn highlight_again(&mut self) {
+        let newest = self.next.as_deref().unwrap_or(self);
+        let fresh = DiffView::new(&newest.path, newest.source, (*newest.diff).clone());
+        // Not a language we highlight: nothing would ever replace this one.
+        if fresh.is_loading() {
+            self.replace_when_highlighted(fresh);
+        }
+    }
+
     /// The task that works out the code's syntax colors in `flavor`'s theme, on a thread
     /// of its own (see `on_thread`), since that can take a while (up to 0.7 s for both
     /// sides of a 5000-line file). `None` if there's nothing to start: it's already been
@@ -956,6 +968,28 @@ mod tests {
         assert!(Arc::ptr_eq(&view.diff, &new));
         assert!(view.next.is_none());
         assert!(!view.is_loading());
+    }
+
+    #[test]
+    fn test_highlighting_again_keeps_the_code_on_screen_until_it_is_done() {
+        let source = DiffSource::Unstaged;
+        let mut view = DiffView::new("main.rs", source, rust_diff("fn main() {}"));
+        let shown = Arc::clone(&view.diff);
+        view.set_colors(&shown, None);
+
+        view.highlight_again();
+        assert!(!view.is_loading());
+        assert!(Arc::ptr_eq(&view.diff, &shown));
+        assert!(view.start_highlighting(Flavor::Latte).is_some());
+
+        let fresh = Arc::clone(&view.next.as_ref().expect("waiting").diff);
+        view.set_colors(&fresh, None);
+        assert!(Arc::ptr_eq(&view.diff, &fresh));
+
+        // Plain text is never highlighted, so there's nothing to wait for.
+        let mut plain = DiffView::new("notes.txt", source, rust_diff("plain"));
+        plain.highlight_again();
+        assert!(plain.next.is_none());
     }
 
     #[test]

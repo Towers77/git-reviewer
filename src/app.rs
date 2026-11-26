@@ -269,9 +269,11 @@ pub struct App {
     error: Option<AppError>,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
-    /// Set when the selected repo's base from the config doesn't resolve. Kept apart
-    /// from `error` so it neither hides nor gets hidden by git errors.
+    /// Set when the selected repo's base from the config doesn't resolve: Del. branch
+    /// is then off. It's told in the toast; `reported_base_error` is the last one told,
+    /// kept across worktree switches so the same one isn't told again and again.
     base_error: Option<String>,
+    reported_base_error: Option<String>,
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
@@ -363,6 +365,7 @@ impl App {
             commit_message: text_editor::Content::new(),
             base_counts: None,
             base_error: None,
+            reported_base_error: None,
             collapsed: HashSet::new(),
             hovered_repo: None,
             repo_menu: None,
@@ -555,6 +558,7 @@ impl App {
                         Ok(config) => self.config.bases = config.bases,
                         Err(err) => self.error = Some(config_error(err)),
                     }
+                    self.reported_base_error = None;
                 }
                 return self.rescan();
             }
@@ -1188,15 +1192,28 @@ impl App {
         self.base_counts = match loaded.base {
             Some((base, Ok(counts))) => Some((base, counts)),
             Some((base, Err(_))) => {
-                // A configured base that doesn't resolve is a typo in the config;
-                // say so instead of quietly dropping the "from base" line.
+                // A configured base that doesn't resolve is a typo in the config: say
+                // so, instead of quietly treating every branch as unmerged.
                 if loaded.base_is_configured {
-                    self.base_error = Some(format!("Base `{base}` from the config not found"));
+                    let repo = self.selected_repo().map_or("", |repo| repo.name());
+                    self.base_error = Some(format!(
+                        "Base `{base}` for {repo} in config.toml's [bases] not found, so \
+                         Del. branch stays off"
+                    ));
                 }
                 None
             }
             None => None,
         };
+        // Told in the toast once per broken base, not on every refresh (each file change
+        // reads the status again), so closing the toast sticks. The Refresh button,
+        // which re-reads the config, forgets it, so a base still broken is told again.
+        if let Some(problem) = &self.base_error
+            && self.reported_base_error.as_ref() != Some(problem)
+        {
+            self.error = Some(AppError::Message(problem.clone()));
+            self.reported_base_error = Some(problem.clone());
+        }
     }
 
     /// Runs a git action that changes the selected worktree (stage, unstage...) in

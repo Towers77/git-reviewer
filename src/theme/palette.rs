@@ -334,8 +334,10 @@ pub struct Colors {
     pub added: Color,
     pub renamed: Color,
     pub deleted: Color,
-    /// The sidebar's change counts: the status color, faint, behind the color itself.
+    /// Behind count chips and the diff's Staged/Unstaged tag: the status color, faint,
+    /// behind text in the color itself. Yellow for changes, green for staged ones.
     pub modified_chip: Color,
+    pub added_chip: Color,
     /// Diff rows: the status color over the background.
     pub added_tint: Color,
     pub removed_tint: Color,
@@ -400,6 +402,7 @@ impl Colors {
             renamed: named(Accent::Blue).color(),
             deleted: red.color(),
             modified_chip: yellow.alpha(CHIP_ALPHA),
+            added_chip: green.alpha(CHIP_ALPHA),
             added_tint: green.alpha(0.12),
             removed_tint: red.alpha(0.12),
             added_gutter: background.mix(green, 0.2).color(),

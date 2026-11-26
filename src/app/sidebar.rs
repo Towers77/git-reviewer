@@ -333,7 +333,7 @@ fn initials(name: &str) -> String {
 }
 
 /// A count in a chip: `color` text on `background`, centered in a fixed height.
-fn chip<'a>(count: usize, color: Color, background: Color) -> Element<'a, Message> {
+pub(super) fn chip<'a>(count: usize, color: Color, background: Color) -> Element<'a, Message> {
     container(
         text(count.to_string())
             .size(text_sizes::TAG)

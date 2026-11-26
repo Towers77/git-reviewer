@@ -11,8 +11,8 @@ Runs on Windows, macOS (Apple silicon) and Linux (x64). Built in Rust with
 ## Features
 
 - **Every repo in one sidebar.** Point the app at a folder: each repo directly inside it
-  shows up with its worktrees. Each branch shows how far it is ahead of or behind its base.
-  Repos you're not using can be archived into a collapsible section at the bottom.
+  shows up with its worktrees, under a colored badge you can change. Repos you're not
+  using can be archived into a collapsible section at the bottom.
 - **Changes like in VS Code:** staged and unstaged changes, stage or unstage per file,
   discard with a confirmation, and commit with `Ctrl+Enter` (`⌘+Enter` on macOS).
 - **Whole-file diffs** with the changes inline, a line-number gutter that stays in place
@@ -90,12 +90,12 @@ root = "C:\\Users\\me\\repos"     # the folder whose repos the app shows
 web-client = "origin/development"  # instead of its origin/HEAD
 ```
 
-By default each repo's branches are compared with `origin/HEAD`, the remote's default
-branch. Use `[bases]` for repos where work merges into a different branch. The key is the
+A branch can only be deleted from the app once it's fully merged into its base, which is
+`origin/HEAD` (the remote's default branch) unless `[bases]` names another. The key is the
 repo's folder name.
 
-The same folder holds `state.toml`, where the app remembers panel widths and archived
-repos on its own. You don't need to edit it.
+The same folder holds `state.toml`, where the app remembers panel widths, archived repos,
+repo colors and the theme on its own. You don't need to edit it.
 
 ## Building from source
 

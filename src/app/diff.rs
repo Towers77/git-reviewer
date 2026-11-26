@@ -444,10 +444,11 @@ fn diff_header<'a>(
     source: DiffSource,
     counts: Option<(usize, usize)>,
 ) -> Element<'a, Message> {
-    let side = match source {
-        DiffSource::Staged => "Staged",
-        DiffSource::Unstaged => "Unstaged",
-        DiffSource::Untracked => "Untracked",
+    // Tinted like the list's section it comes from: green for staged, yellow for changes.
+    let (side, color, background) = match source {
+        DiffSource::Staged => ("Staged", c.added, c.added_chip),
+        DiffSource::Unstaged => ("Unstaged", c.modified, c.modified_chip),
+        DiffSource::Untracked => ("Untracked", c.modified, c.modified_chip),
     };
 
     // Pushed piece by piece: a `None` child in `row!` would still take a gap.
@@ -457,7 +458,7 @@ fn diff_header<'a>(
             .wrapping(Wrapping::None),
         container(text(side).size(text_sizes::LABEL))
             .padding([1.0, 6.0])
-            .style(theme::filled_tag(c)),
+            .style(theme::filled_tag(color, background)),
         space().width(Fill),
     ]
     .spacing(10)

@@ -18,6 +18,7 @@ use iced::widget::text::{LineHeight, Shaping};
 use iced::{Font, Radians, Rotation, Size, alignment};
 
 use super::file_icon::file_icon;
+use super::sidebar::{badge, chip};
 use super::{App, DiscardScope, Message, RemoteOp, Removal, Section, empty_state};
 use crate::git::{ChangeKind, DiffSource, FileEntry, Status};
 use crate::theme::icons::{self, chevron, icon};
@@ -59,56 +60,34 @@ impl App {
     fn changes_header<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
         let c = &self.colors;
         let branch = status.branch.as_deref().unwrap_or("(detached)");
-        let upstream = status.upstream.as_ref().map(|u| u.name.as_str());
-        let repo_name = self.selected_repo().map(|repo| repo.name());
-        // Only shown when the base isn't the upstream itself, or it would repeat Sync's ↑↓.
-        let base_line = self
-            .base_counts
-            .as_ref()
-            .filter(|(base, _)| Some(base.as_str()) != upstream)
-            .map(|(base, (ahead, behind))| format!("↑{ahead} ↓{behind} from {base}"));
+        let repo = self.selected_repo();
 
-        // The repo and upstream go on their own line under the branch: side by side, a
-        // long branch took the whole width (a row hands out width left to right) and
-        // squeezed them away. On this line the repo comes first, so a long upstream is
-        // what gets cut. Pushed only when present: a `None` child would still take a gap.
-        let mut repo_line = row![].spacing(layouts::GAP).padding(Padding::ZERO.top(2.0));
-        if let Some(repo_name) = repo_name {
-            repo_line = repo_line.push(
-                ellipsized_text(repo_name)
+        // The branch, behind the repo's badge, then the repo under it. The upstream and
+        // the "from base" counts aren't shown: Sync's ↑↓ already tells the upstream's,
+        // and a broken base is told in the toast (see `apply_status`).
+        let mut branch_line = row![].spacing(layouts::GAP).align_y(Center);
+        if let Some(repo) = repo {
+            branch_line = branch_line.push(badge(c, repo.name(), self.repo_color(repo.path())));
+        }
+        branch_line = branch_line.push(
+            ellipsized_text(branch)
+                .size(text_sizes::BRANCH)
+                .font(fonts::UI_SEMIBOLD)
+                .wrapping(Wrapping::None),
+        );
+
+        let mut header = column![branch_line].spacing(4);
+        if let Some(repo) = repo {
+            header = header.push(
+                ellipsized_text(repo.name())
                     .size(text_sizes::SMALL)
                     .color(c.text_muted)
                     .wrapping(Wrapping::None),
             );
         }
-        if let Some(upstream) = upstream {
-            repo_line = repo_line.push(
-                ellipsized_text(upstream)
-                    .size(text_sizes::SMALL)
-                    .color(c.text_dim)
-                    .wrapping(Wrapping::None),
-            );
-        }
-
-        column![
-            ellipsized_text(branch)
-                .size(text_sizes::BRANCH)
-                .font(fonts::UI_SEMIBOLD)
-                .wrapping(Wrapping::None),
-            repo_line,
-            // A broken base from the config takes the base line's place, in red.
-            match &self.base_error {
-                Some(problem) => Some(
-                    text(problem.as_str())
-                        .size(text_sizes::LABEL)
-                        .color(c.danger)
-                ),
-                None =>
-                    base_line.map(|line| { text(line).size(text_sizes::LABEL).color(c.text_dim) }),
-            },
-        ]
-        .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
-        .into()
+        header
+            .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
+            .into()
     }
 
     fn commit_section<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
@@ -226,12 +205,7 @@ impl App {
             }
 
             let open = self.is_open(&section);
-            let mut group = column![section_header(
-                c,
-                format!("{title} · {}", files.len()),
-                section,
-                open
-            )];
+            let mut group = column![section_header(c, title, files.len(), section, open)];
             if open {
                 let rows = files
                     .into_iter()
@@ -445,33 +419,47 @@ fn commit_shortcut(key_press: KeyPress, can_commit: bool) -> Option<Binding<Mess
     Binding::from_key_press(key_press)
 }
 
-/// "STAGED CHANGES · 3" behind a chevron, with its stage-all / unstage-all buttons on
-/// the right. Clicking anywhere else on it folds the group away or opens it again.
+/// "STAGED CHANGES" and its file count in a chip (green for staged, yellow for changes)
+/// behind a chevron, with its stage-all / unstage-all buttons on the right. Clicking
+/// anywhere else on it folds the group away or opens it again.
 fn section_header<'a>(
     c: &Colors,
-    title: String,
+    title: &str,
+    count: usize,
     section: Section,
     open: bool,
 ) -> Element<'a, Message> {
-    let actions = if section == Section::Staged {
-        row![icon_button(c, icons::MINUS, Message::UnstageAll, false)]
+    let (actions, chip_color, chip_background) = if section == Section::Staged {
+        (
+            row![icon_button(c, icons::MINUS, Message::UnstageAll, false)],
+            c.added,
+            c.added_chip,
+        )
     } else {
-        row![
-            icon_button(
-                c,
-                icons::DISCARD,
-                Message::DiscardRequested(DiscardScope::All),
-                false
-            ),
-            icon_button(c, icons::PLUS, Message::StageAll, false),
-        ]
+        (
+            row![
+                icon_button(
+                    c,
+                    icons::DISCARD,
+                    Message::DiscardRequested(DiscardScope::All),
+                    false
+                ),
+                icon_button(c, icons::PLUS, Message::StageAll, false),
+            ],
+            c.modified,
+            c.modified_chip,
+        )
     };
 
     let title = button(
-        row![chevron(c, open), theme::label(c, &title),]
-            .spacing(6)
-            .height(Fill)
-            .align_y(Center),
+        row![
+            chevron(c, open),
+            theme::label(c, title),
+            chip(count, chip_color, chip_background),
+        ]
+        .spacing(6)
+        .height(Fill)
+        .align_y(Center),
     )
     .on_press(Message::ToggleSection(section))
     .width(Fill)

@@ -550,12 +550,11 @@ pub fn scrollbar(c: &Colors) -> impl Fn(&Theme, scrollable::Status) -> scrollabl
     }
 }
 
-/// A filled, square-ish label like the diff header's "Unstaged".
-pub fn filled_tag(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
-    let (text, pill) = (c.text, c.pill);
+/// A filled, square-ish label like the diff header's "Unstaged": `text` on `background`.
+pub fn filled_tag(text: Color, background: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         text_color: Some(text),
-        background: Some(pill.into()),
+        background: Some(background.into()),
         border: Border {
             radius: radii::TAG.into(),
             ..Border::default()

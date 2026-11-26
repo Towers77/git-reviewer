@@ -11,6 +11,9 @@
 //! archived = ['C:\repos\old-project']   # archived repos, by their folder's full path
 //! archived_open = false                 # whether the Archived section is open
 //!
+//! [sidebar.repo_colors]                 # badge colors picked in a repo's menu
+//! 'C:\repos\web-app' = "Teal"
+//!
 //! [theme]           # the three picked colors; every other shade is worked out from them
 //! background = "#1e1e2e"
 //! text = "#cdd6f4"
@@ -22,15 +25,15 @@
 //! just means the defaults (the next save replaces it), and unknown keys are ignored
 //! rather than rejected. A bad `[theme]` value only resets the theme, and says so.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::app::PanelWidths;
 use crate::config::{self, Config, ConfigError};
-use crate::theme::palette::ThemeSettings;
+use crate::theme::palette::{Accent, ThemeSettings};
 
 const FILE_NAME: &str = "state.toml";
 
@@ -51,6 +54,21 @@ pub struct SidebarState {
     pub archived: BTreeSet<PathBuf>,
     /// Whether the Archived section is open; closed until opened.
     pub archived_open: bool,
+    /// The repo colors picked in their menus, by folder like `archived`. A repo with no
+    /// entry gets one worked out from its folder (see `sidebar::repo_color`). An entry
+    /// that isn't a color name is dropped, so it costs only that repo's pick.
+    #[serde(deserialize_with = "known_colors")]
+    pub repo_colors: BTreeMap<PathBuf, Accent>,
+}
+
+fn known_colors<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<PathBuf, Accent>, D::Error> {
+    let entries = BTreeMap::<PathBuf, toml::Value>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|(repo, color)| Some((repo, color.try_into().ok()?)))
+        .collect())
 }
 
 impl State {
@@ -173,6 +191,19 @@ mod tests {
     }
 
     #[test]
+    fn test_bad_repo_color_drops_only_that_entry() {
+        let state = parse(
+            "[sidebar]\narchived = ['C:\\repos\\old']\n\
+             [sidebar.repo_colors]\n'C:\\a' = 'Teal'\n'C:\\b' = 'Teall'\n'C:\\c' = 3\n",
+        );
+        assert_eq!(state.sidebar.archived.len(), 1);
+        assert_eq!(
+            state.sidebar.repo_colors.into_iter().collect::<Vec<_>>(),
+            vec![(PathBuf::from(r"C:\a"), Accent::Teal)]
+        );
+    }
+
+    #[test]
     fn test_round_trip() {
         let mut state = State::default();
         state.panels.sidebar = 333.25;
@@ -181,6 +212,10 @@ mod tests {
             .archived
             .insert(PathBuf::from(r"C:\repos\old"));
         state.sidebar.archived_open = true;
+        state
+            .sidebar
+            .repo_colors
+            .insert(PathBuf::from(r"C:\repos\web-app"), Accent::Teal);
         state.theme.accent = AccentChoice::Custom(Rgb(0xff, 0x88, 0x00));
 
         let text = toml::to_string_pretty(&state).unwrap();

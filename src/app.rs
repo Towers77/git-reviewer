@@ -6,6 +6,7 @@ mod changes;
 mod diff;
 mod file_icon;
 mod panels;
+mod popup;
 mod sidebar;
 mod sticky;
 mod watch;
@@ -33,6 +34,7 @@ use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace
 use crate::highlight::{Flavor, LineColors};
 use crate::state::State;
 use crate::theme::icons::{self, icon};
+use crate::theme::palette::Accent;
 use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
 use diff::DiffView;
 use panels::Divider;
@@ -96,8 +98,14 @@ pub enum Message {
     RemovalAnswered(RemovalPlan, bool),
     /// A section header was clicked: fold the section away, or open it again.
     ToggleSection(Section),
-    /// A repo's archive button was clicked, with the repo's folder.
+    /// "Archive repository" was clicked in a repo's menu, with the repo's folder.
     ArchiveRepo(PathBuf),
+    /// A repo's ⋯ button was clicked, with the repo's folder: open its menu, or close it.
+    RepoMenuToggled(PathBuf),
+    /// The open menu was closed by a click outside it or Escape (see `popup`).
+    MenuDismissed,
+    /// A color was picked in a repo's menu, for its badge.
+    RepoColorPicked(PathBuf, Accent),
     /// An archived repo's unarchive button was clicked, with the repo's folder.
     UnarchiveRepo(PathBuf),
     /// The sidebar's Archived header was clicked: open or close the list.
@@ -270,6 +278,8 @@ pub struct App {
     /// The repo whose sidebar header is under the cursor, by folder: it shows its archive
     /// button in place of its worktree count.
     hovered_repo: Option<PathBuf>,
+    /// The repo whose ⋯ menu is open, by folder.
+    repo_menu: Option<PathBuf>,
     /// What's remembered between runs in `state.toml`: the panel widths the user dragged
     /// to (what's shown may be narrower: see `PanelWidths::fitted`).
     state: State,
@@ -355,6 +365,7 @@ impl App {
             base_error: None,
             collapsed: HashSet::new(),
             hovered_repo: None,
+            repo_menu: None,
             state,
             dragging: None,
             window_width: f32::INFINITY,
@@ -479,6 +490,7 @@ impl App {
     fn scan_now(&mut self) {
         self.workspace = scan_root(self.root.as_deref(), &self.state.sidebar.archived);
         self.workspace_version += 1;
+        self.repo_menu = None;
     }
 
     /// Drops the result of a rescan that's running, and queues a fresh one: for changes
@@ -555,6 +567,17 @@ impl App {
                     // `workspace_version`).
                     Some(Scanned { version, workspace }) if version == self.workspace_version => {
                         self.workspace = Arc::unwrap_or_clone(workspace);
+                        // A menu stays open only on a repo that's still there; else it
+                        // would open by itself if the repo came back.
+                        let menu_repo_kept = self.workspace.as_ref().is_ok_and(|workspace| {
+                            workspace
+                                .repos()
+                                .iter()
+                                .any(|repo| Some(repo.path()) == self.repo_menu.as_deref())
+                        });
+                        if !menu_repo_kept {
+                            self.repo_menu = None;
+                        }
                         // The selected worktree may be gone (removed outside the app).
                         let task = if self.selected_worktree().is_none() {
                             self.select_worktree(None)
@@ -817,10 +840,11 @@ impl App {
                 }
                 self.invalidate_scans();
                 // Its row is gone, so its `on_exit` never comes: without this, the repo
-                // would come back from the Archived list showing its archive button.
+                // would come back from the Archived list showing its ⋯ button.
                 if self.hovered_repo.as_ref() == Some(&repo) {
                     self.hovered_repo = None;
                 }
+                self.repo_menu = None;
                 self.state.sidebar.archived.insert(repo);
                 self.save_state("the archived repos");
                 return task;
@@ -849,6 +873,19 @@ impl App {
                     // enter may arrive before this exit.
                     self.hovered_repo = None;
                 }
+            }
+            Message::RepoMenuToggled(repo) => {
+                self.repo_menu = if self.repo_menu.as_ref() == Some(&repo) {
+                    None
+                } else {
+                    Some(repo)
+                };
+            }
+            Message::MenuDismissed => self.repo_menu = None,
+            // The menu stays open, so the new pick shows in its swatches.
+            Message::RepoColorPicked(repo, color) => {
+                self.state.sidebar.repo_colors.insert(repo, color);
+                self.save_state("the repo's color");
             }
             Message::ToggleArchived => {
                 self.state.sidebar.archived_open = !self.state.sidebar.archived_open;

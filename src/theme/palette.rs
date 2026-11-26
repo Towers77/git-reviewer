@@ -139,6 +139,23 @@ impl Accent {
         Accent::Lavender,
     ];
 
+    /// The colors a repo's badge can take: all but red, which means deleted or gone.
+    pub const REPO: [Accent; 13] = [
+        Accent::Rosewater,
+        Accent::Flamingo,
+        Accent::Pink,
+        Accent::Mauve,
+        Accent::Maroon,
+        Accent::Peach,
+        Accent::Yellow,
+        Accent::Green,
+        Accent::Teal,
+        Accent::Sky,
+        Accent::Sapphire,
+        Accent::Blue,
+        Accent::Lavender,
+    ];
+
     pub const fn name(self) -> &'static str {
         match self {
             Accent::Rosewater => "Rosewater",
@@ -261,6 +278,10 @@ impl Default for ThemeSettings {
 const LIGHT_BACKGROUND: f32 = 0.4;
 /// Above this luminance the accent is light enough to carry dark text; below it, white.
 const LIGHT_ACCENT: f32 = 0.35;
+/// How strong a chip's background is: its text color, see-through.
+const CHIP_ALPHA: f32 = 0.16;
+/// The same for a repo's badge, a step stronger so its initials read as one block.
+pub const BADGE_ALPHA: f32 = 0.18;
 
 /// Every color the UI draws with, by role. Built once per theme change and copied into
 /// the style functions, so nothing here is worked out per frame.
@@ -313,6 +334,8 @@ pub struct Colors {
     pub added: Color,
     pub renamed: Color,
     pub deleted: Color,
+    /// The sidebar's change counts: the status color, faint, behind the color itself.
+    pub modified_chip: Color,
     /// Diff rows: the status color over the background.
     pub added_tint: Color,
     pub removed_tint: Color,
@@ -350,6 +373,7 @@ impl Colors {
         };
         let red = named(Accent::Red);
         let green = named(Accent::Green);
+        let yellow = named(Accent::Yellow);
 
         Colors {
             light,
@@ -371,10 +395,11 @@ impl Colors {
             selected_hover: panel.mix(accent, 0.3).color(),
             danger: red.color(),
             danger_border: red.alpha(0.35),
-            modified: named(Accent::Yellow).color(),
+            modified: yellow.color(),
             added: green.color(),
             renamed: named(Accent::Blue).color(),
             deleted: red.color(),
+            modified_chip: yellow.alpha(CHIP_ALPHA),
             added_tint: green.alpha(0.12),
             removed_tint: red.alpha(0.12),
             added_gutter: background.mix(green, 0.2).color(),

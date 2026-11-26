@@ -20,6 +20,8 @@ pub mod text_sizes {
     pub const SMALL: f32 = 14.0;
     pub const LABEL: f32 = 13.0;
     pub const TAG: f32 = 12.0;
+    /// A repo badge's initials.
+    pub const BADGE: f32 = 10.0;
 }
 
 /// UI icon sizes, also 2px above the mockup. Odd sizes put a 24-unit icon's centre lines
@@ -33,16 +35,11 @@ pub mod icon_sizes {
     pub const CHEVRON: f32 = 14.0;
     /// The diff's loading spinner.
     pub const SPINNER: f32 = 24.0;
-    /// The sidebar's archive/unarchive buttons (in a `layouts::SIDEBAR_ICON_BUTTON`).
+    /// The sidebar's ⋯ and unarchive buttons (in a `layouts::SIDEBAR_ICON_BUTTON`).
     pub const SIDEBAR_BUTTON: f32 = 14.0;
 }
 
 pub mod layouts {
-    // `Pixels` only appears in the Windows-tuned tag/pill line heights below.
-    #[cfg(target_os = "windows")]
-    use iced::Pixels;
-    use iced::{Padding, widget::text::LineHeight};
-
     // Bars and panels
     pub const TOP_BAR_HEIGHT: f32 = 48.0;
     // Panel widths: draggable (see app/panels.rs), from these defaults down to these
@@ -60,9 +57,20 @@ pub mod layouts {
     pub const BUTTON_HEIGHT: f32 = 32.0;
     pub const PRIMARY_BUTTON_HEIGHT: f32 = 34.0;
     pub const ICON_BUTTON: f32 = 24.0;
-    /// The sidebar's archive/unarchive buttons: smaller, like VS Code's tree-row actions,
+    /// The sidebar's ⋯ and unarchive buttons: smaller, like VS Code's tree-row actions,
     /// so they fit the repo rows without making them taller.
     pub const SIDEBAR_ICON_BUTTON: f32 = 20.0;
+    /// A repo's badge (its initials on its color): wider than tall, for two letters.
+    pub const BADGE_WIDTH: f32 = 24.0;
+    pub const BADGE_HEIGHT: f32 = 18.0;
+    /// Count chips (the sidebar's change counts): a fixed height, text centered in it.
+    pub const CHIP_HEIGHT: f32 = 18.0;
+    /// The repo menu, and its color swatches (a ring around a dot when picked).
+    pub const REPO_MENU_WIDTH: f32 = 232.0;
+    pub const SWATCH: f32 = 26.0;
+    pub const SWATCH_GAP: f32 = 4.0;
+    /// The repo menu's Archive item.
+    pub const MENU_ITEM_HEIGHT: f32 = 30.0;
     /// File rows and section headers in the changes list.
     pub const LIST_ROW_HEIGHT: f32 = 32.0;
     /// Catppuccin's file icons are drawn on a 16px grid; any other size blurs their
@@ -96,60 +104,15 @@ pub mod layouts {
     /// The sidebar's Archived list scrolls past this height (about six rows), so an
     /// open list never takes over the repos above it.
     pub const ARCHIVED_LIST_MAX_HEIGHT: f32 = 180.0;
-
-    // Sidebar tags ("main", "gone"): the label's line box and the padding around it,
-    // chosen so the lowercase letters sit centered between the borders. Segoe UI's line
-    // box keeps tall room above the letters (for accents), which put them 2px low, with
-    // the "g" touching the bottom border; so on Windows the box is shortened and the
-    // room moved below it. Same outer height either way. Measured by rendering the tags
-    // and counting pixels: 5px above and 5px below the letters' body on Windows. Inter
-    // sits centered with the defaults; San Francisco's metrics are close to Inter's.
-    #[cfg(target_os = "windows")]
-    pub const TAG_LINE_HEIGHT: LineHeight = LineHeight::Absolute(Pixels(13.0));
-    #[cfg(target_os = "windows")]
-    pub const TAG_PADDING: Padding = Padding {
-        top: 1.0,
-        right: 5.0,
-        bottom: 4.0,
-        left: 5.0,
-    };
-    #[cfg(not(target_os = "windows"))]
-    pub const TAG_LINE_HEIGHT: LineHeight = LineHeight::Relative(1.3);
-    #[cfg(not(target_os = "windows"))]
-    pub const TAG_PADDING: Padding = Padding {
-        top: 1.0,
-        right: 5.0,
-        bottom: 1.0,
-        left: 5.0,
-    };
-
-    // The sidebar's change-count pill: the same Segoe UI effect put its digits 1px low
-    // (6px above, 4px below); this gives 5 and 5 at the same height, measured the same
-    // way. Not measured on macOS yet: Inter showed the opposite (1px high).
-    #[cfg(target_os = "windows")]
-    pub const PILL_LINE_HEIGHT: LineHeight = LineHeight::Absolute(Pixels(14.0));
-    #[cfg(target_os = "windows")]
-    pub const PILL_PADDING: Padding = Padding {
-        top: 2.0,
-        right: 6.0,
-        bottom: 3.0,
-        left: 6.0,
-    };
-    #[cfg(not(target_os = "windows"))]
-    pub const PILL_LINE_HEIGHT: LineHeight = LineHeight::Relative(1.3);
-    #[cfg(not(target_os = "windows"))]
-    pub const PILL_PADDING: Padding = Padding {
-        top: 1.0,
-        right: 6.0,
-        bottom: 1.0,
-        left: 6.0,
-    };
 }
 
 pub mod radii {
     pub const CONTROL: f32 = 6.0;
     pub const TAG: f32 = 4.0;
-    pub const PILL: f32 = 9.0;
+    pub const BADGE: f32 = 5.0;
+    /// Half a chip's height: round ends.
+    pub const CHIP: f32 = 9.0;
+    pub const MENU: f32 = 8.0;
 }
 
 /// The same fonts VS Code uses: the system UI font for everything, and Fira Code (his
@@ -172,6 +135,11 @@ pub mod fonts {
         weight: Weight::Semibold,
         ..UI
     };
+    /// Only for the small text in badges and chips, which reads thin at semibold.
+    pub const UI_BOLD: Font = Font {
+        weight: Weight::Bold,
+        ..UI
+    };
     /// Bundled (assets/fonts, OFL). Only for the diff, where columns must line up;
     /// everything else uses UI, so rows never mix two fonts' vertical metrics.
     pub const MONO: Font = Font::with_name("Fira Code");
@@ -191,6 +159,11 @@ pub mod icons {
     pub const CHEVRON_DOWN: &[u8] = include_bytes!("../assets/icons/chevron-down.svg");
     pub const CHEVRON_RIGHT: &[u8] = include_bytes!("../assets/icons/chevron-right.svg");
     pub const GIT_BRANCH: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
+    /// The branch icon with its curve cut: a worktree whose upstream is gone.
+    pub const GIT_BRANCH_BROKEN: &[u8] = include_bytes!("../assets/icons/git-branch-broken.svg");
+    /// A repo's main worktree, like VS Code's repository icon.
+    pub const BOOK_CHECK: &[u8] = include_bytes!("../assets/icons/book-check.svg");
+    pub const ELLIPSIS: &[u8] = include_bytes!("../assets/icons/ellipsis.svg");
     pub const MINUS: &[u8] = include_bytes!("../assets/icons/minus.svg");
     pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
@@ -351,15 +324,99 @@ pub fn list_row(
     }
 }
 
-pub fn tag(border: Color, text: Color) -> impl Fn(&Theme) -> container::Style {
+/// A row that looks hovered whether it is or not: a repo header while its menu is open
+/// (the menu takes the mouse, so the row itself never sees the hover).
+pub fn held_row(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (text, hover) = (c.text, c.hover);
+    move |_, _| button::Style {
+        background: Some(hover.into()),
+        text_color: text,
+        border: Border {
+            radius: radii::CONTROL.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// A repo's badge: its initials in its color, on the same color faint.
+pub fn badge(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        text_color: Some(color),
+        background: Some(color.scale_alpha(palette::BADGE_ALPHA).into()),
+        border: Border {
+            radius: radii::BADGE.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A round dot of `color`: a color swatch's fill.
+pub fn dot(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(color.into()),
+        border: Border {
+            radius: (layouts::SWATCH / 2.0).into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A count chip: `text` on `background`, with round ends.
+pub fn chip(text: Color, background: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         text_color: Some(text),
+        background: Some(background.into()),
+        border: Border {
+            radius: radii::CHIP.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A dropdown menu's card: the panel color with a line around it and a shadow under it.
+pub fn menu(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
+    let (background, border) = (c.panel, c.control_border);
+    move |_| container::Style {
+        background: Some(background.into()),
         border: Border {
             color: border,
             width: 1.0,
-            radius: radii::TAG.into(),
+            radius: radii::MENU.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            offset: Vector::new(0.0, 8.0),
+            blur_radius: 24.0,
         },
         ..container::Style::default()
+    }
+}
+
+/// A color swatch: a ring in the text color around it when it's the picked one, and a
+/// fainter ring on hover. The swatch itself is the button's content.
+pub fn swatch(
+    c: &Colors,
+    picked: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (ring, hover_ring) = (c.text, c.text_dim);
+    move |_, status| {
+        let color = match status {
+            _ if picked => ring,
+            button::Status::Hovered | button::Status::Pressed => hover_ring,
+            _ => Color::TRANSPARENT,
+        };
+        button::Style {
+            border: Border {
+                color,
+                width: 2.0,
+                radius: (layouts::SWATCH / 2.0).into(),
+            },
+            ..button::Style::default()
+        }
     }
 }
 
@@ -392,6 +449,20 @@ pub fn icon_button(
             button::Status::Hovered | button::Status::Pressed => base.with_background(hover),
             button::Status::Disabled => dimmed(base),
         }
+    }
+}
+
+/// An `icon_button` whose menu is open: it keeps its hover background meanwhile.
+pub fn open_icon_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (text, background) = (c.text_muted, c.pill);
+    move |_, _| button::Style {
+        background: Some(background.into()),
+        text_color: text,
+        border: Border {
+            radius: radii::TAG.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
     }
 }
 
@@ -508,19 +579,6 @@ pub fn toast(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
             color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
             offset: Vector::new(0.0, 4.0),
             blur_radius: 16.0,
-        },
-        ..container::Style::default()
-    }
-}
-
-pub fn pill(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
-    let (text, pill) = (c.text, c.pill);
-    move |_| container::Style {
-        text_color: Some(text),
-        background: Some(pill.into()),
-        border: Border {
-            radius: radii::PILL.into(),
-            ..Border::default()
         },
         ..container::Style::default()
     }

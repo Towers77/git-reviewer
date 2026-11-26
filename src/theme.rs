@@ -4,6 +4,8 @@ use iced::{
     widget::{Row, button, container, rule, scrollable, text, text_editor},
 };
 
+pub mod palette;
+
 pub mod colors {
     use iced::{Color, color};
 

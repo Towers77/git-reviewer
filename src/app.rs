@@ -320,6 +320,12 @@ impl App {
             }
         };
 
+        let (state, bad_theme) = State::load();
+        if let Some(warning) = &bad_theme {
+            // The toast holds one message: a config or command-line error matters more.
+            error.get_or_insert_with(|| AppError::Message(warning.clone()));
+        }
+
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
             rescan: Rescan::Idle,
@@ -344,10 +350,14 @@ impl App {
             base_error: None,
             collapsed: HashSet::new(),
             hovered_repo: None,
-            state: State::load(),
+            state,
             dragging: None,
             window_width: f32::INFINITY,
         };
+        // Written now, so the file matches what the toast says.
+        if bad_theme.is_some() {
+            app.save_state("the default theme");
+        }
         app.scan_now();
         app
     }

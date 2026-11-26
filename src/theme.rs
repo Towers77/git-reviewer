@@ -6,40 +6,10 @@ use iced::{
 
 pub mod palette;
 
-pub mod colors {
-    use iced::{Color, color};
-
-    pub const BACKGROUND: Color = color!(0x18191c);
-    pub const SURFACE: Color = color!(0x1f2023);
-    pub const SIDEBAR: Color = color!(0x1c1d20);
-    pub const BORDER: Color = color!(0x2e2f34);
-    pub const CONTROL_BORDER: Color = color!(0x36373d);
-    pub const TAG_BORDER: Color = color!(0x44464d);
-    pub const HOVER: Color = color!(0x26272b);
-    pub const SELECTED: Color = color!(0x2a3550);
-    /// A button hovered on top of a SELECTED row: the same blue, a step lighter.
-    pub const SELECTED_HOVER: Color = color!(0x3a4a70);
-    pub const FOCUS: Color = color!(0x5b9bff);
-    pub const TEXT: Color = color!(0xe6e6e9);
-    pub const TEXT_MUTED: Color = color!(0xa1a3ab);
-    pub const TEXT_DIM: Color = color!(0x8b8e97);
-    pub const LINE_NUMBER: Color = color!(0x6f727b);
-    pub const PILL: Color = color!(0x3a3b41);
-    pub const SCROLLBAR_HOVER: Color = color!(0x4a4c53);
-    pub const PRIMARY: Color = color!(0x3d7be0);
-    /// Text and icons on PRIMARY buttons: the app's dark background, not white.
-    pub const ON_PRIMARY: Color = BACKGROUND;
-    pub const DANGER: Color = color!(0xf0857a);
-    pub const DANGER_BORDER: Color = color!(0x5a3a37);
-    pub const MODIFIED: Color = color!(0xe5b567);
-    pub const ADDED: Color = color!(0x7cc48a);
-    pub const RENAMED: Color = color!(0x6fb3e8);
-    pub const DELETED: Color = DANGER;
-    pub const ADDED_TINT: Color = color!(0x7cc48a, 0.13);
-    pub const REMOVED_TINT: Color = color!(0xf0857a, 0.13);
-    pub const ADDED_GUTTER: Color = color!(0x252f2a);
-    pub const REMOVED_GUTTER: Color = color!(0x342728);
-}
+/// The colors are worked out at runtime from the user's theme (see `palette`). `App`
+/// owns them, and every style function here takes them: each copies the few colors it
+/// needs into the closure it returns (`use<>`: the closure doesn't borrow them).
+pub use palette::Colors;
 
 // Everything is 2px above the mockup's sizes (asked for 2026-11-21: easier to read on
 // a QHD monitor). The mockup's were 13 / 14 / 15 / 12 / 11 / 10.
@@ -231,9 +201,9 @@ pub mod icons {
     pub const UNARCHIVE: &[u8] = include_bytes!("../assets/icons/archive-restore.svg");
 
     /// A foldable section's chevron: down while it's open, right while it's collapsed.
-    pub fn chevron<'a>(open: bool) -> Svg<'a> {
+    pub fn chevron<'a>(c: &super::Colors, open: bool) -> Svg<'a> {
         let bytes = if open { CHEVRON_DOWN } else { CHEVRON_RIGHT };
-        icon(bytes, super::icon_sizes::CHEVRON, super::colors::TEXT_MUTED)
+        icon(bytes, super::icon_sizes::CHEVRON, c.text_muted)
     }
 
     pub fn icon<'a>(bytes: &'static [u8], size: f32, color: Color) -> Svg<'a> {
@@ -249,83 +219,93 @@ pub mod icons {
 /// the setting on), so each character is its own text, in a row spaced `LABEL_TRACKING`
 /// apart. That drops kerning, which spaced capitals don't need: measured, the
 /// characters' widths add up exactly to the whole label's, spaces included.
-pub fn label<'a, Message: 'a>(content: &str) -> Row<'a, Message> {
+pub fn label<'a, Message: 'a>(c: &Colors, content: &str) -> Row<'a, Message> {
     Row::with_children(content.chars().map(|character| {
         text(character.to_string())
             .size(text_sizes::LABEL)
             .font(fonts::UI_SEMIBOLD)
-            .color(colors::TEXT_MUTED)
+            .color(c.text_muted)
             .into()
     }))
     .spacing(layouts::LABEL_TRACKING)
 }
 
-pub fn divider(theme: &Theme) -> rule::Style {
-    rule::Style {
-        color: colors::BORDER,
+pub fn divider(c: &Colors) -> impl Fn(&Theme) -> rule::Style + use<> {
+    let color = c.border;
+    move |theme| rule::Style {
+        color,
         ..rule::default(theme)
     }
 }
 
-pub fn outline_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let base = button::Style {
-        background: None,
-        text_color: colors::TEXT,
-        border: Border {
-            color: colors::CONTROL_BORDER,
-            width: 1.0,
-            radius: radii::CONTROL.into(),
-        },
-        ..button::Style::default()
-    };
+pub fn outline_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (text, border, hover) = (c.text, c.control_border, c.hover);
+    move |_, status| {
+        let base = button::Style {
+            background: None,
+            text_color: text,
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: radii::CONTROL.into(),
+            },
+            ..button::Style::default()
+        };
 
-    match status {
-        button::Status::Active => base,
-        button::Status::Hovered | button::Status::Pressed => base.with_background(colors::HOVER),
-        button::Status::Disabled => dimmed(base),
+        match status {
+            button::Status::Active => base,
+            button::Status::Hovered | button::Status::Pressed => base.with_background(hover),
+            button::Status::Disabled => dimmed(base),
+        }
     }
 }
 
-pub fn danger_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let base = button::Style {
-        background: None,
-        text_color: colors::DANGER,
-        border: Border {
-            color: colors::DANGER_BORDER,
-            width: 1.0,
-            radius: radii::CONTROL.into(),
-        },
-        ..button::Style::default()
-    };
+pub fn danger_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (danger, border, hover) = (c.danger, c.danger_border, c.hover);
+    move |_, status| {
+        let base = button::Style {
+            background: None,
+            text_color: danger,
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: radii::CONTROL.into(),
+            },
+            ..button::Style::default()
+        };
 
-    match status {
-        button::Status::Active => base,
-        button::Status::Hovered | button::Status::Pressed => base.with_background(colors::HOVER),
-        button::Status::Disabled => dimmed(base),
+        match status {
+            button::Status::Active => base,
+            button::Status::Hovered | button::Status::Pressed => base.with_background(hover),
+            button::Status::Disabled => dimmed(base),
+        }
     }
 }
 
-pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let base = button::Style {
-        background: Some(colors::PRIMARY.into()),
-        text_color: colors::ON_PRIMARY,
-        border: Border {
-            color: colors::PRIMARY,
-            width: 0.0,
-            radius: radii::CONTROL.into(),
-        },
-        ..button::Style::default()
-    };
+pub fn primary_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (accent, on_accent, pill, text_dim) = (c.accent, c.on_accent, c.pill, c.text_dim);
+    move |_, status| {
+        let base = button::Style {
+            background: Some(accent.into()),
+            text_color: on_accent,
+            border: Border {
+                color: accent,
+                width: 0.0,
+                radius: radii::CONTROL.into(),
+            },
+            ..button::Style::default()
+        };
 
-    match status {
-        // Not `dimmed`: half-faded dark text on a half-faded blue is unreadable. A
-        // neutral grey button reads as "off" and stays legible.
-        button::Status::Disabled => button::Style {
-            background: Some(colors::PILL.into()),
-            text_color: colors::TEXT_DIM,
-            ..base
-        },
-        _ => base,
+        match status {
+            // Not `dimmed`: half-faded text on a half-faded accent is unreadable. A
+            // neutral grey button reads as "off" and stays legible.
+            button::Status::Disabled => button::Style {
+                background: Some(pill.into()),
+                text_color: text_dim,
+                ..base
+            },
+            _ => base,
+        }
     }
 }
 
@@ -341,15 +321,19 @@ fn dimmed(style: button::Style) -> button::Style {
     }
 }
 
-pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub fn list_row(
+    c: &Colors,
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let (selected_color, text, hover) = (c.selected, c.text, c.hover);
     move |_, status| {
         let base = button::Style {
             background: if selected {
-                Some(colors::SELECTED.into())
+                Some(selected_color.into())
             } else {
                 None
             },
-            text_color: colors::TEXT,
+            text_color: text,
             border: Border {
                 color: Color::TRANSPARENT,
                 width: 0.0,
@@ -361,9 +345,7 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
         match status {
             _ if selected => base,
             button::Status::Active => base,
-            button::Status::Hovered | button::Status::Pressed => {
-                base.with_background(colors::HOVER)
-            }
+            button::Status::Hovered | button::Status::Pressed => base.with_background(hover),
             button::Status::Disabled => dimmed(base),
         }
     }
@@ -382,23 +364,27 @@ pub fn tag(border: Color, text: Color) -> impl Fn(&Theme) -> container::Style {
 }
 
 /// The small square +/−/discard buttons in the file list. Their hover has to stand out
-/// from the row under them, which is itself highlighted: one step lighter than HOVER
-/// (PILL) on a plain row, one step lighter than SELECTED on the selected row.
-pub fn icon_button(on_selected_row: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+/// from the row under them, which is itself highlighted: one step stronger than `hover`
+/// (`pill`) on a plain row, one step stronger than `selected` on the selected row.
+pub fn icon_button(
+    c: &Colors,
+    on_selected_row: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
+    let text = c.text_muted;
+    let hover = if on_selected_row {
+        c.selected_hover
+    } else {
+        c.pill
+    };
     move |_, status| {
         let base = button::Style {
             background: None,
-            text_color: colors::TEXT_MUTED,
+            text_color: text,
             border: Border {
                 radius: radii::TAG.into(),
                 ..Border::default()
             },
             ..button::Style::default()
-        };
-        let hover = if on_selected_row {
-            colors::SELECTED_HOVER
-        } else {
-            colors::PILL
         };
 
         match status {
@@ -409,22 +395,27 @@ pub fn icon_button(on_selected_row: bool) -> impl Fn(&Theme, button::Status) -> 
     }
 }
 
-pub fn commit_input(_theme: &Theme, status: text_editor::Status) -> text_editor::Style {
-    let border_color = match status {
-        text_editor::Status::Focused { .. } => colors::FOCUS,
-        _ => colors::CONTROL_BORDER,
-    };
+pub fn commit_input(
+    c: &Colors,
+) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style + use<> {
+    let c = *c;
+    move |_, status| {
+        let border_color = match status {
+            text_editor::Status::Focused { .. } => c.accent,
+            _ => c.control_border,
+        };
 
-    text_editor::Style {
-        background: colors::BACKGROUND.into(),
-        border: Border {
-            color: border_color,
-            width: 1.0,
-            radius: radii::CONTROL.into(),
-        },
-        placeholder: colors::TEXT_DIM,
-        value: colors::TEXT,
-        selection: colors::PRIMARY.scale_alpha(0.4),
+        text_editor::Style {
+            background: c.background.into(),
+            border: Border {
+                color: border_color,
+                width: 1.0,
+                radius: radii::CONTROL.into(),
+            },
+            placeholder: c.text_dim,
+            value: c.text,
+            selection: c.accent.scale_alpha(0.4),
+        }
     }
 }
 
@@ -443,57 +434,57 @@ pub fn embedded_scrollbar() -> scrollable::Scrollbar {
     thin_scrollbar().spacing(0)
 }
 
-/// Every scrollbar in the app: no track, a PILL-grey thumb that lightens on hover/drag.
-pub fn scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
-    let rail = |active: bool| scrollable::Rail {
-        background: None,
-        border: Border::default(),
-        scroller: scrollable::Scroller {
-            background: if active {
-                colors::SCROLLBAR_HOVER.into()
-            } else {
-                colors::PILL.into()
+/// Every scrollbar in the app: no track, a `pill` thumb that lightens on hover/drag.
+pub fn scrollbar(c: &Colors) -> impl Fn(&Theme, scrollable::Status) -> scrollable::Style + use<> {
+    let (thumb, thumb_hover) = (c.pill, c.scrollbar_hover);
+    move |theme, status| {
+        let rail = |active: bool| scrollable::Rail {
+            background: None,
+            border: Border::default(),
+            scroller: scrollable::Scroller {
+                background: if active { thumb_hover } else { thumb }.into(),
+                border: Border {
+                    radius: 3.0.into(),
+                    ..Border::default()
+                },
             },
-            border: Border {
-                radius: 3.0.into(),
-                ..Border::default()
-            },
-        },
-    };
+        };
 
-    let (horizontal_active, vertical_active) = match status {
-        scrollable::Status::Active { .. } => (false, false),
-        scrollable::Status::Hovered {
-            is_horizontal_scrollbar_hovered,
-            is_vertical_scrollbar_hovered,
-            ..
-        } => (
-            is_horizontal_scrollbar_hovered,
-            is_vertical_scrollbar_hovered,
-        ),
-        scrollable::Status::Dragged {
-            is_horizontal_scrollbar_dragged,
-            is_vertical_scrollbar_dragged,
-            ..
-        } => (
-            is_horizontal_scrollbar_dragged,
-            is_vertical_scrollbar_dragged,
-        ),
-    };
+        let (horizontal_active, vertical_active) = match status {
+            scrollable::Status::Active { .. } => (false, false),
+            scrollable::Status::Hovered {
+                is_horizontal_scrollbar_hovered,
+                is_vertical_scrollbar_hovered,
+                ..
+            } => (
+                is_horizontal_scrollbar_hovered,
+                is_vertical_scrollbar_hovered,
+            ),
+            scrollable::Status::Dragged {
+                is_horizontal_scrollbar_dragged,
+                is_vertical_scrollbar_dragged,
+                ..
+            } => (
+                is_horizontal_scrollbar_dragged,
+                is_vertical_scrollbar_dragged,
+            ),
+        };
 
-    scrollable::Style {
-        vertical_rail: rail(vertical_active),
-        horizontal_rail: rail(horizontal_active),
-        gap: None,
-        ..scrollable::default(theme, status)
+        scrollable::Style {
+            vertical_rail: rail(vertical_active),
+            horizontal_rail: rail(horizontal_active),
+            gap: None,
+            ..scrollable::default(theme, status)
+        }
     }
 }
 
 /// A filled, square-ish label like the diff header's "Unstaged".
-pub fn filled_tag(_theme: &Theme) -> container::Style {
-    container::Style {
-        text_color: Some(colors::TEXT),
-        background: Some(colors::PILL.into()),
+pub fn filled_tag(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
+    let (text, pill) = (c.text, c.pill);
+    move |_| container::Style {
+        text_color: Some(text),
+        background: Some(pill.into()),
         border: Border {
             radius: radii::TAG.into(),
             ..Border::default()
@@ -504,11 +495,12 @@ pub fn filled_tag(_theme: &Theme) -> container::Style {
 
 /// The error toast's card: a step lighter than the panels under it, with a red border
 /// and a shadow to lift it off them.
-pub fn toast(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(colors::HOVER.into()),
+pub fn toast(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
+    let (background, border) = (c.hover, c.danger_border);
+    move |_| container::Style {
+        background: Some(background.into()),
         border: Border {
-            color: colors::DANGER_BORDER,
+            color: border,
             width: 1.0,
             radius: radii::CONTROL.into(),
         },
@@ -521,10 +513,11 @@ pub fn toast(_theme: &Theme) -> container::Style {
     }
 }
 
-pub fn pill(_theme: &Theme) -> container::Style {
-    container::Style {
-        text_color: Some(colors::TEXT),
-        background: Some(colors::PILL.into()),
+pub fn pill(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
+    let (text, pill) = (c.text, c.pill);
+    move |_| container::Style {
+        text_color: Some(text),
+        background: Some(pill.into()),
         border: Border {
             radius: radii::PILL.into(),
             ..Border::default()
@@ -533,16 +526,23 @@ pub fn pill(_theme: &Theme) -> container::Style {
     }
 }
 
-pub fn app_theme() -> Theme {
+/// A plain background: the panels and the top bar.
+pub fn background(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::background(color)
+}
+
+/// iced's own theme, for what the style functions above don't set (the default text
+/// color, mainly). Built when the colors change, not per frame.
+pub fn app_theme(c: &Colors) -> Theme {
     Theme::custom(
         "Git Reviewer",
         Palette {
-            background: colors::BACKGROUND,
-            text: colors::TEXT,
-            primary: colors::PRIMARY,
-            success: colors::ADDED,
-            warning: colors::MODIFIED,
-            danger: colors::DANGER,
+            background: c.background,
+            text: c.text,
+            primary: c.accent,
+            success: c.added,
+            warning: c.modified,
+            danger: c.danger,
         },
     )
 }

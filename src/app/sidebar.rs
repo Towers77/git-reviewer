@@ -15,10 +15,11 @@ use super::changes::sized_icon_button;
 use super::{App, Message, Section};
 use crate::git::{Repo, Workspace, Worktree};
 use crate::theme::icons::{self, chevron, icon};
-use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
+use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
 
 impl App {
     pub(super) fn sidebar<'a>(&'a self, workspace: &'a Workspace) -> Element<'a, Message> {
+        let c = &self.colors;
         let selected = self.selected_worktree_path.as_deref();
 
         // The panel's padding goes inside the scrollable, so the bar runs the panel's full
@@ -27,10 +28,10 @@ impl App {
         let repos = scrollable(
             container(
                 column![
-                    container(theme::label(&format!(
-                        "REPOSITORIES · {}",
-                        workspace.repos().len()
-                    )))
+                    container(theme::label(
+                        c,
+                        &format!("REPOSITORIES · {}", workspace.repos().len())
+                    ))
                     .padding([0.0, 8.0]),
                     // Keyed by repo, so each row keeps its own hover state: in a plain
                     // column, archiving a repo slides the next one into its widget state,
@@ -38,7 +39,7 @@ impl App {
                     keyed_column(workspace.repos().iter().map(|repo| {
                         let open = self.is_open(&Section::Repo(repo.name().to_string()));
                         let hovered = self.hovered_repo.as_deref() == Some(repo.path());
-                        (repo_key(repo), repo_view(repo, selected, open, hovered))
+                        (repo_key(repo), repo_view(c, repo, selected, open, hovered))
                     }))
                     .spacing(layouts::REPO_GAP),
                 ]
@@ -47,7 +48,7 @@ impl App {
             .padding([layouts::PANEL_PADDING_Y, layouts::ROW_PADDING_X]),
         )
         .direction(Direction::Vertical(theme::embedded_scrollbar()))
-        .style(theme::scrollbar)
+        .style(theme::scrollbar(c))
         .width(Fill)
         .height(Fill);
 
@@ -61,7 +62,7 @@ impl App {
         container(panel)
             .width(Fill)
             .height(Fill)
-            .style(|_| container::background(colors::SIDEBAR))
+            .style(theme::background(c.panel))
             .into()
     }
 
@@ -73,12 +74,13 @@ impl App {
         if archived.is_empty() {
             return None;
         }
+        let c = &self.colors;
         let open = self.state.sidebar.archived_open;
 
         let header = button(
             row![
-                chevron(open),
-                theme::label(&format!("ARCHIVED · {}", archived.len())),
+                chevron(c, open),
+                theme::label(c, &format!("ARCHIVED · {}", archived.len())),
             ]
             .spacing(6)
             .align_y(Center),
@@ -86,20 +88,19 @@ impl App {
         .on_press(Message::ToggleArchived)
         .width(Fill)
         .padding([4.0, 8.0])
-        .style(theme::list_row(false));
+        .style(theme::list_row(c, false));
 
         let mut section = column![
-            rule::horizontal(1).style(theme::divider),
+            rule::horizontal(1).style(theme::divider(c)),
             container(header).padding([6.0, layouts::ROW_PADDING_X]),
         ];
         if open {
-            let list = scrollable(
-                container(column(archived.iter().map(archived_view)).spacing(2)).padding(
-                    Padding::from([0.0, layouts::ROW_PADDING_X]).bottom(layouts::PANEL_PADDING_Y),
-                ),
-            )
+            let rows = archived.iter().map(|repo| archived_view(c, repo));
+            let list = scrollable(container(column(rows).spacing(2)).padding(
+                Padding::from([0.0, layouts::ROW_PADDING_X]).bottom(layouts::PANEL_PADDING_Y),
+            ))
             .direction(Direction::Vertical(theme::embedded_scrollbar()))
-            .style(theme::scrollbar)
+            .style(theme::scrollbar(c))
             .width(Fill);
 
             section = section.push(container(list).max_height(layouts::ARCHIVED_LIST_MAX_HEIGHT));
@@ -117,21 +118,22 @@ fn repo_key(repo: &Repo) -> u64 {
 
 /// "1 worktree", "2 worktrees", as tall as the archive button that replaces it on hover,
 /// so the row's height doesn't change when one swaps for the other.
-fn worktree_count<'a>(repo: &Repo) -> Container<'a, Message> {
+fn worktree_count<'a>(c: &Colors, repo: &Repo) -> Container<'a, Message> {
     let count = repo.worktrees().len();
     let label = if count == 1 {
         "1 worktree".to_string()
     } else {
         format!("{count} worktrees")
     };
-    container(text(label).size(text_sizes::SMALL).color(colors::TEXT_DIM))
+    container(text(label).size(text_sizes::SMALL).color(c.text_dim))
         .height(layouts::SIDEBAR_ICON_BUTTON)
         .align_y(Center)
 }
 
 /// The sidebar's archive/unarchive button.
-fn archive_button<'a>(bytes: &'static [u8], message: Message) -> Element<'a, Message> {
+fn archive_button<'a>(c: &Colors, bytes: &'static [u8], message: Message) -> Element<'a, Message> {
     sized_icon_button(
+        c,
         bytes,
         message,
         false,
@@ -145,6 +147,7 @@ fn archive_button<'a>(bytes: &'static [u8], message: Message) -> Element<'a, Mes
 /// button), which folds its worktree list away when clicked, and the list itself while
 /// open.
 fn repo_view<'a>(
+    c: &Colors,
     repo: &'a Repo,
     selected: Option<&Path>,
     open: bool,
@@ -154,16 +157,16 @@ fn repo_view<'a>(
     // A click on the archive button doesn't also fold the repo: iced's button skips a
     // click its content already handled.
     let end = if hovered {
-        archive_button(icons::ARCHIVE, Message::ArchiveRepo(path.clone()))
+        archive_button(c, icons::ARCHIVE, Message::ArchiveRepo(path.clone()))
     } else {
-        worktree_count(repo).into()
+        worktree_count(c, repo).into()
     };
 
     // The name fills the row and is cut to fit, so the count chip always keeps its place
     // at the end (a row lays out `Fill` children last, with whatever width is left).
     let header = button(
         row![
-            chevron(open),
+            chevron(c, open),
             ellipsized_text(repo.name())
                 .font(fonts::UI_SEMIBOLD)
                 .wrapping(Wrapping::None)
@@ -178,7 +181,7 @@ fn repo_view<'a>(
     )))
     .width(Fill)
     .padding([2.0, 8.0])
-    .style(theme::list_row(false));
+    .style(theme::list_row(c, false));
 
     // Only the header counts as hovering the repo, not its worktree rows.
     let header = mouse_area(header)
@@ -197,7 +200,7 @@ fn repo_view<'a>(
             column(
                 repo.worktrees()
                     .iter()
-                    .map(|wt| worktree_view(wt, selected)),
+                    .map(|wt| worktree_view(c, wt, selected)),
             )
             .spacing(2),
         );
@@ -209,18 +212,19 @@ fn repo_view<'a>(
 /// placed like a repo header's. It has no chevron (its worktrees aren't listed), so the
 /// row is indented by the chevron and its gap to keep the names in line with the
 /// headers above.
-fn archived_view(repo: &Repo) -> Element<'_, Message> {
+fn archived_view<'a>(c: &Colors, repo: &'a Repo) -> Element<'a, Message> {
     container(
         row![
             ellipsized_text(repo.name())
-                .color(colors::TEXT_MUTED)
+                .color(c.text_muted)
                 .wrapping(Wrapping::None)
                 .width(Fill),
             archive_button(
+                c,
                 icons::UNARCHIVE,
                 Message::UnarchiveRepo(repo.path().to_path_buf()),
             ),
-            worktree_count(repo),
+            worktree_count(c, repo),
         ]
         .spacing(6)
         .align_y(Center),
@@ -230,7 +234,11 @@ fn archived_view(repo: &Repo) -> Element<'_, Message> {
     .into()
 }
 
-fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element<'a, Message> {
+fn worktree_view<'a>(
+    c: &Colors,
+    worktree: &'a Worktree,
+    selected: Option<&Path>,
+) -> Element<'a, Message> {
     let label = worktree.branch().unwrap_or(&worktree.head()[..7]);
     let is_selected = selected == Some(worktree.path());
     let status = worktree.cached_status();
@@ -244,12 +252,13 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
         .style(theme::tag(border, color))
     };
 
+    // The main tag's border is the 33% step (`scrollbar_hover`), as the old one was.
     let main_tag = worktree
         .is_main()
-        .then(|| tag("main", colors::TAG_BORDER, colors::TEXT_MUTED));
+        .then(|| tag("main", c.scrollbar_hover, c.text_muted));
     let gone_tag = status
         .is_some_and(|s| s.is_upstream_gone())
-        .then(|| tag("gone", colors::DANGER_BORDER, colors::DANGER));
+        .then(|| tag("gone", c.danger_border, c.danger));
     let change_pill = status
         .map(|s| s.change_count())
         .filter(|count| *count > 0)
@@ -261,7 +270,7 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
                     .line_height(layouts::PILL_LINE_HEIGHT),
             )
             .padding(layouts::PILL_PADDING)
-            .style(theme::pill)
+            .style(theme::pill(c))
         });
 
     // Badges are pushed only when present: a `None` child in `row!` still takes a
@@ -273,7 +282,7 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
 
     button(
         row![
-            icon(icons::GIT_BRANCH, icon_sizes::ROW, colors::TEXT_MUTED),
+            icon(icons::GIT_BRANCH, icon_sizes::ROW, c.text_muted),
             ellipsized_text(label).wrapping(Wrapping::None).width(Fill),
         ]
         .extend(badges)
@@ -283,6 +292,6 @@ fn worktree_view<'a>(worktree: &'a Worktree, selected: Option<&Path>) -> Element
     .on_press(Message::WorktreeSelected(worktree.path().to_path_buf()))
     .width(Fill)
     .padding(Padding::from([6.0, 8.0]).left(26.0))
-    .style(theme::list_row(is_selected))
+    .style(theme::list_row(c, is_selected))
     .into()
 }

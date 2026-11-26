@@ -300,7 +300,8 @@ pub struct Colors {
     pub accent: Color,
     /// Text and icons on the accent: dark on a light accent, white on a dark one.
     pub on_accent: Color,
-    /// The selected worktree and file rows.
+    /// The selected worktree and file rows: the accent over the panel. Opaque, since a
+    /// row's hover buttons sit on a patch of it that must hide the name under them.
     pub selected: Color,
     /// A button hovered on top of a selected row: the same accent, a step stronger.
     pub selected_hover: Color,
@@ -366,8 +367,8 @@ impl Colors {
             text: text.color(),
             accent: accent.color(),
             on_accent,
-            selected: accent.alpha(0.16),
-            selected_hover: accent.alpha(0.3),
+            selected: panel.mix(accent, 0.16).color(),
+            selected_hover: panel.mix(accent, 0.3).color(),
             danger: red.color(),
             danger_border: red.alpha(0.35),
             modified: named(Accent::Yellow).color(),

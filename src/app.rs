@@ -24,7 +24,7 @@ use iced::widget::{
     Container, button, column, container, opaque, row, rule, scrollable, space, stack, text,
     text_editor,
 };
-use iced::{Alignment::Center, Color, Element, Fill, Padding, Subscription, Task, window};
+use iced::{Alignment::Center, Color, Element, Fill, Padding, Subscription, Task, Theme, window};
 use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::{Duration, Instant};
 
@@ -33,7 +33,7 @@ use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace
 use crate::highlight::LineColors;
 use crate::state::State;
 use crate::theme::icons::{self, icon};
-use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
+use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
 use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
@@ -278,6 +278,10 @@ pub struct App {
     dragging: Option<(Divider, PanelWidths)>,
     /// Infinite until the window first reports its size, which it does when it opens.
     window_width: f32,
+    /// Every color the UI draws with, worked out from `state.theme`, and iced's theme
+    /// made from them. Both are rebuilt only when the theme changes.
+    colors: Colors,
+    iced_theme: Theme,
 }
 impl App {
     /// The root comes from the command line when one is given (and is then remembered
@@ -325,6 +329,7 @@ impl App {
             // The toast holds one message: a config or command-line error matters more.
             error.get_or_insert_with(|| AppError::Message(warning.clone()));
         }
+        let colors = Colors::new(&state.theme);
 
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
@@ -353,6 +358,8 @@ impl App {
             state,
             dragging: None,
             window_width: f32::INFINITY,
+            iced_theme: theme::app_theme(&colors),
+            colors,
         };
         // Written now, so the file matches what the toast says.
         if bad_theme.is_some() {
@@ -919,14 +926,20 @@ impl App {
         Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
     }
 
+    /// iced's theme: asked for by iced (see main.rs), a cheap clone of a shared one.
+    pub fn theme(&self) -> Theme {
+        self.iced_theme.clone()
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
+        let c = &self.colors;
         let body: Element<'_, Message> = match &self.workspace {
             // No root yet, or it can't be read (moved, deleted): offer to pick one.
             Err(err) => {
                 let color = if self.root.is_some() {
-                    colors::DANGER
+                    c.danger
                 } else {
-                    colors::TEXT_MUTED
+                    c.text_muted
                 };
 
                 container(
@@ -941,7 +954,7 @@ impl App {
                         .on_press(Message::ChooseRoot)
                         .height(layouts::PRIMARY_BUTTON_HEIGHT)
                         .padding([0.0, 16.0])
-                        .style(theme::primary_button),
+                        .style(theme::primary_button(c)),
                     ]
                     .align_x(Center),
                 )
@@ -956,12 +969,12 @@ impl App {
                         container(self.sidebar(workspace))
                             .width(widths.sidebar)
                             .height(Fill),
-                        rule::vertical(1).style(theme::divider),
+                        rule::vertical(1).style(theme::divider(c)),
                         container(self.changes_panel())
                             .width(widths.changes)
                             .height(Fill)
-                            .style(|_| container::background(colors::SURFACE)),
-                        rule::vertical(1).style(theme::divider),
+                            .style(theme::background(c.panel)),
+                        rule::vertical(1).style(theme::divider(c)),
                         container(self.diff_panel()).width(Fill).height(Fill),
                     ]
                     .height(Fill),
@@ -973,7 +986,7 @@ impl App {
 
         let window = column![
             self.top_bar(),
-            rule::horizontal(1).style(theme::divider),
+            rule::horizontal(1).style(theme::divider(c)),
             body
         ];
 
@@ -996,6 +1009,7 @@ impl App {
     /// `report`). A long message, like a hook's output, scrolls inside the card.
     fn error_toast(&self) -> Option<Element<'_, Message>> {
         let error = self.error.as_ref()?;
+        let c = &self.colors;
 
         let message = scrollable(
             container(text(error.to_string()).size(text_sizes::SMALL).width(Fill))
@@ -1003,27 +1017,23 @@ impl App {
                 .padding(Padding::ZERO.right(10.0)),
         )
         .direction(Direction::Vertical(theme::thin_scrollbar()))
-        .style(theme::scrollbar)
+        .style(theme::scrollbar(c))
         .width(Fill);
 
         let card = container(
             row![
                 // 2px down: centers the icon on the message's first line.
-                container(icon(
-                    icons::CIRCLE_ALERT,
-                    icon_sizes::BUTTON,
-                    colors::DANGER
-                ))
-                .padding(Padding::ZERO.top(2.0)),
+                container(icon(icons::CIRCLE_ALERT, icon_sizes::BUTTON, c.danger))
+                    .padding(Padding::ZERO.top(2.0)),
                 message,
-                changes::icon_button(icons::X, Message::DismissError, false),
+                changes::icon_button(c, icons::X, Message::DismissError, false),
             ]
             .spacing(layouts::GAP),
         )
         .padding([10.0, 12.0])
         .width(layouts::TOAST_WIDTH)
         .max_height(layouts::TOAST_MAX_HEIGHT)
-        .style(theme::toast);
+        .style(theme::toast(c));
 
         // `opaque`: in a stack, the mouse passes through to the layer below wherever the
         // top layer has nothing interactive, so clicks on the message's text would land
@@ -1038,20 +1048,18 @@ impl App {
     }
 
     fn top_bar(&self) -> Element<'_, Message> {
+        let c = &self.colors;
         let bar_button = |icon_bytes: &'static [u8], label: &'static str, message: Message| {
             button(
-                row![
-                    icon(icon_bytes, icon_sizes::BUTTON, colors::TEXT),
-                    text(label)
-                ]
-                .spacing(6)
-                .height(Fill)
-                .align_y(Center),
+                row![icon(icon_bytes, icon_sizes::BUTTON, c.text), text(label)]
+                    .spacing(6)
+                    .height(Fill)
+                    .align_y(Center),
             )
             .on_press(message)
             .height(layouts::BUTTON_HEIGHT)
             .padding([0.0, 12.0])
-            .style(theme::outline_button)
+            .style(theme::outline_button(c))
         };
 
         container(
@@ -1070,11 +1078,11 @@ impl App {
                     // Same size as the title: in a centered row, text of different sizes
                     // sits at different baselines (~0.8px apart for 16 vs 14 in Segoe UI).
                     .size(text_sizes::TITLE)
-                    .color(colors::TEXT_MUTED),
+                    .color(c.text_muted),
                 )
                 .on_press(Message::ChooseRoot)
                 .padding([4.0, 8.0])
-                .style(theme::list_row(false)),
+                .style(theme::list_row(c, false)),
                 space().width(Fill),
                 bar_button(icons::DOWNLOAD, "Fetch all", Message::FetchAll),
                 bar_button(icons::ROTATE_CW, "Refresh", Message::Refresh),
@@ -1085,7 +1093,7 @@ impl App {
         .height(layouts::TOP_BAR_HEIGHT)
         .padding([0.0, layouts::PANEL_PADDING_X])
         .align_y(Center)
-        .style(|_| container::background(colors::SURFACE))
+        .style(theme::background(c.top_bar))
         .into()
     }
 

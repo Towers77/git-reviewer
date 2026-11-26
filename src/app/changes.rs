@@ -21,36 +21,35 @@ use super::file_icon::file_icon;
 use super::{App, DiscardScope, Message, RemoteOp, Removal, Section, empty_state};
 use crate::git::{ChangeKind, DiffSource, FileEntry, Status};
 use crate::theme::icons::{self, chevron, icon};
-use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
+use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
 
 impl App {
     pub(super) fn changes_panel(&self) -> Element<'_, Message> {
+        let c = &self.colors;
         let status = match &self.status {
             // The selected worktree's status is on its way (see `App::load_status`).
             None if self.selected_worktree_path.is_some() => return space().into(),
             None => {
-                return empty_state("Select a worktree", colors::TEXT_MUTED)
+                return empty_state("Select a worktree", c.text_muted)
                     .center(Fill)
                     .into();
             }
             Some(Err(err)) => {
-                return empty_state(err.to_string(), colors::DANGER)
-                    .center(Fill)
-                    .into();
+                return empty_state(err.to_string(), c.danger).center(Fill).into();
             }
             Some(Ok(status)) => status,
         };
 
         column![
             self.changes_header(status),
-            rule::horizontal(1).style(theme::divider),
+            rule::horizontal(1).style(theme::divider(c)),
             self.commit_section(status),
-            rule::horizontal(1).style(theme::divider),
+            rule::horizontal(1).style(theme::divider(c)),
             scrollable(self.file_list(status))
                 .direction(Direction::Vertical(theme::thin_scrollbar()))
-                .style(theme::scrollbar)
+                .style(theme::scrollbar(c))
                 .height(Fill),
-            rule::horizontal(1).style(theme::divider),
+            rule::horizontal(1).style(theme::divider(c)),
             container(self.changes_footer(status))
                 .padding([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]),
         ]
@@ -58,6 +57,7 @@ impl App {
     }
 
     fn changes_header<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        let c = &self.colors;
         let branch = status.branch.as_deref().unwrap_or("(detached)");
         let upstream = status.upstream.as_ref().map(|u| u.name.as_str());
         let repo_name = self.selected_repo().map(|repo| repo.name());
@@ -77,7 +77,7 @@ impl App {
             repo_line = repo_line.push(
                 ellipsized_text(repo_name)
                     .size(text_sizes::SMALL)
-                    .color(colors::TEXT_MUTED)
+                    .color(c.text_muted)
                     .wrapping(Wrapping::None),
             );
         }
@@ -85,7 +85,7 @@ impl App {
             repo_line = repo_line.push(
                 ellipsized_text(upstream)
                     .size(text_sizes::SMALL)
-                    .color(colors::TEXT_DIM)
+                    .color(c.text_dim)
                     .wrapping(Wrapping::None),
             );
         }
@@ -101,10 +101,10 @@ impl App {
                 Some(problem) => Some(
                     text(problem.as_str())
                         .size(text_sizes::LABEL)
-                        .color(colors::DANGER)
+                        .color(c.danger)
                 ),
-                None => base_line
-                    .map(|line| { text(line).size(text_sizes::LABEL).color(colors::TEXT_DIM) }),
+                None =>
+                    base_line.map(|line| { text(line).size(text_sizes::LABEL).color(c.text_dim) }),
             },
         ]
         .padding(Padding::from([layouts::PANEL_PADDING_Y, layouts::PANEL_PADDING_X]).top(14.0))
@@ -112,6 +112,7 @@ impl App {
     }
 
     fn commit_section<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        let c = &self.colors;
         let staged_count = status.files.iter().filter(|f| f.staged.is_some()).count();
         let unstaged_count = status.files.iter().filter(|f| f.unstaged.is_some()).count();
         let counts = status.upstream.as_ref().and_then(|u| u.counts);
@@ -147,9 +148,9 @@ impl App {
         // The icon isn't text, so the button style's text color doesn't reach it; it gets
         // the same color as the label by hand (see `theme::primary_button`).
         let icon_color = if on_press.is_some() {
-            colors::ON_PRIMARY
+            c.on_accent
         } else {
-            colors::TEXT_DIM
+            c.text_dim
         };
         // One turn per second since the operation started; 0 when idle.
         let angle = self
@@ -176,7 +177,7 @@ impl App {
 
         container(
             column![
-                theme::label("COMMIT MESSAGE"),
+                theme::label(c, "COMMIT MESSAGE"),
                 text_editor(&self.commit_message)
                     .placeholder(if cfg!(target_os = "macos") {
                         "Message (⌘+Enter to commit)"
@@ -187,12 +188,12 @@ impl App {
                     .key_binding(move |key_press| commit_shortcut(key_press, can_commit))
                     .padding([8.0, 10.0])
                     .height(layouts::COMMIT_BOX_HEIGHT)
-                    .style(theme::commit_input),
+                    .style(theme::commit_input(c)),
                 button(container(content).center(Fill))
                     .on_press_maybe(on_press)
                     .height(layouts::PRIMARY_BUTTON_HEIGHT)
                     .width(Fill)
-                    .style(theme::primary_button),
+                    .style(theme::primary_button(c)),
             ]
             .spacing(layouts::GAP),
         )
@@ -201,8 +202,9 @@ impl App {
     }
 
     fn file_list<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        let c = &self.colors;
         if status.files.is_empty() {
-            return empty_state("No changes in this worktree", colors::TEXT_MUTED)
+            return empty_state("No changes in this worktree", c.text_muted)
                 .center_x(Fill)
                 .into();
         }
@@ -225,6 +227,7 @@ impl App {
 
             let open = self.is_open(&section);
             let mut group = column![section_header(
+                c,
                 format!("{title} · {}", files.len()),
                 section,
                 open
@@ -257,6 +260,7 @@ impl App {
         kind: ChangeKind,
         staged: bool,
     ) -> Element<'a, Message> {
+        let c = &self.colors;
         let source = if staged {
             DiffSource::Staged
         } else if kind == ChangeKind::Untracked {
@@ -273,6 +277,7 @@ impl App {
         // VS Code's order: discard first, then stage; a staged file can only be unstaged.
         let actions = if staged {
             row![icon_button(
+                c,
                 icons::MINUS,
                 Message::Unstage(file.path.clone()),
                 is_selected,
@@ -284,11 +289,17 @@ impl App {
             };
             row![
                 icon_button(
+                    c,
                     icons::DISCARD,
                     Message::DiscardRequested(discard),
                     is_selected
                 ),
-                icon_button(icons::PLUS, Message::Stage(file.path.clone()), is_selected),
+                icon_button(
+                    c,
+                    icons::PLUS,
+                    Message::Stage(file.path.clone()),
+                    is_selected
+                ),
             ]
         };
         let (dir, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
@@ -301,7 +312,7 @@ impl App {
             container(
                 ellipsized_text(dir)
                     .size(text_sizes::SMALL)
-                    .color(colors::TEXT_DIM)
+                    .color(c.text_dim)
                     .wrapping(Wrapping::None),
             )
             .width(Fill)
@@ -318,7 +329,7 @@ impl App {
                 container(name_and_dir).width(Fill),
                 text(kind.to_code().to_string())
                     .font(fonts::UI_SEMIBOLD)
-                    .color(kind_color(kind))
+                    .color(kind_color(c, kind))
                     .width(STATUS_LETTER_WIDTH)
                     .align_x(Horizontal::Center),
             ]
@@ -333,15 +344,11 @@ impl App {
         .width(Fill)
         .height(layouts::LIST_ROW_HEIGHT)
         .padding([0.0, 8.0])
-        .style(theme::list_row(is_selected));
+        .style(theme::list_row(c, is_selected));
 
-        // While hovered the row is HOVER (or SELECTED, which wins); the actions sit on a
-        // patch of that same color so the name slides under them, like VS Code.
-        let row_color = if is_selected {
-            colors::SELECTED
-        } else {
-            colors::HOVER
-        };
+        // While hovered the row is `hover` (or `selected`, which wins); the actions sit on
+        // a patch of that same color so the name slides under them, like VS Code.
+        let row_color = if is_selected { c.selected } else { c.hover };
 
         // The buttons stop just short of the status letter, which stays visible, like
         // VS Code: row padding + letter + a small gap from the right edge.
@@ -350,6 +357,7 @@ impl App {
     }
 
     fn changes_footer<'a>(&'a self, status: &'a Status) -> Element<'a, Message> {
+        let c = &self.colors;
         let worktree_removable = !self.selected_worktree().is_some_and(|w| w.is_main());
         // Deliberate deviation from VS Code: only offer to delete branches with nothing
         // unmerged into the base (no base known → let `git branch -d` decide).
@@ -367,7 +375,7 @@ impl App {
                 .on_press_maybe(enabled.then_some(Message::RemovalRequested(removal)))
                 .height(layouts::BUTTON_HEIGHT)
                 .width(Fill)
-                .style(theme::danger_button)
+                .style(theme::danger_button(c))
         };
 
         row![
@@ -439,22 +447,28 @@ fn commit_shortcut(key_press: KeyPress, can_commit: bool) -> Option<Binding<Mess
 
 /// "STAGED CHANGES · 3" behind a chevron, with its stage-all / unstage-all buttons on
 /// the right. Clicking anywhere else on it folds the group away or opens it again.
-fn section_header<'a>(title: String, section: Section, open: bool) -> Element<'a, Message> {
+fn section_header<'a>(
+    c: &Colors,
+    title: String,
+    section: Section,
+    open: bool,
+) -> Element<'a, Message> {
     let actions = if section == Section::Staged {
-        row![icon_button(icons::MINUS, Message::UnstageAll, false)]
+        row![icon_button(c, icons::MINUS, Message::UnstageAll, false)]
     } else {
         row![
             icon_button(
+                c,
                 icons::DISCARD,
                 Message::DiscardRequested(DiscardScope::All),
                 false
             ),
-            icon_button(icons::PLUS, Message::StageAll, false),
+            icon_button(c, icons::PLUS, Message::StageAll, false),
         ]
     };
 
     let title = button(
-        row![chevron(open), theme::label(&title),]
+        row![chevron(c, open), theme::label(c, &title),]
             .spacing(6)
             .height(Fill)
             .align_y(Center),
@@ -463,10 +477,10 @@ fn section_header<'a>(title: String, section: Section, open: bool) -> Element<'a
     .width(Fill)
     .height(layouts::LIST_ROW_HEIGHT)
     .padding([0.0, 8.0])
-    .style(theme::list_row(false));
+    .style(theme::list_row(c, false));
 
-    // The header is hovered whenever its actions show, so they sit on HOVER too.
-    hover(title, hover_actions(actions, colors::HOVER, 4.0))
+    // The header is hovered whenever its actions show, so they sit on `hover` too.
+    hover(title, hover_actions(actions, c.hover, 4.0))
 }
 
 /// The status letter column at the right end of a file row (wide enough for a
@@ -504,13 +518,15 @@ fn hover_actions<'a>(
 }
 
 /// A small square button holding a row-size icon (24px around 15px). `on_selected_row`
-/// picks a hover color that still shows on the selected row's blue.
+/// picks a hover color that still shows on the selected row's accent.
 pub(super) fn icon_button<'a>(
+    c: &Colors,
     bytes: &'static [u8],
     message: Message,
     on_selected_row: bool,
 ) -> Button<'a, Message> {
     sized_icon_button(
+        c,
         bytes,
         message,
         on_selected_row,
@@ -521,6 +537,7 @@ pub(super) fn icon_button<'a>(
 
 /// `icon_button` at another size: a `size`-square button holding an `icon_size` icon.
 pub(super) fn sized_icon_button<'a>(
+    c: &Colors,
     bytes: &'static [u8],
     message: Message,
     on_selected_row: bool,
@@ -533,7 +550,7 @@ pub(super) fn sized_icon_button<'a>(
     let before = ((size - icon_size) / 2.0).floor();
     let after = size - icon_size - before;
 
-    button(icon(bytes, icon_size, colors::TEXT_MUTED))
+    button(icon(bytes, icon_size, c.text_muted))
         .on_press(message)
         .width(size)
         .height(size)
@@ -543,17 +560,17 @@ pub(super) fn sized_icon_button<'a>(
             right: after,
             bottom: after,
         })
-        .style(theme::icon_button(on_selected_row))
+        .style(theme::icon_button(c, on_selected_row))
 }
 
-fn kind_color(kind: ChangeKind) -> Color {
+fn kind_color(c: &Colors, kind: ChangeKind) -> Color {
     match kind {
-        ChangeKind::Added => colors::ADDED,
-        ChangeKind::Renamed => colors::RENAMED,
-        ChangeKind::Copied => colors::ADDED,
-        ChangeKind::Modified => colors::MODIFIED,
-        ChangeKind::Deleted => colors::DANGER,
-        ChangeKind::TypeChanged => colors::MODIFIED,
-        ChangeKind::Untracked => colors::ADDED,
+        ChangeKind::Added => c.added,
+        ChangeKind::Renamed => c.renamed,
+        ChangeKind::Copied => c.added,
+        ChangeKind::Modified => c.modified,
+        ChangeKind::Deleted => c.deleted,
+        ChangeKind::TypeChanged => c.modified,
+        ChangeKind::Untracked => c.added,
     }
 }

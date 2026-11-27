@@ -55,7 +55,8 @@ pub enum Message {
     DiffScrolled(f32),
     /// The diff's scrolling area was drawn at a new height, in pixels.
     DiffResized(f32),
-    /// A previous / next change arrow in the diff's header was clicked.
+    /// A previous / next change arrow in the diff's header was clicked, or its shortcut
+    /// pressed (see `diff::change_shortcuts`).
     JumpToChange(ChangeStep),
     /// The syntax colors of a diff's lines are worked out (see
     /// `DiffView::start_highlighting`); `None` if it's not a language we highlight.
@@ -988,8 +989,8 @@ impl App {
     }
 
     /// Watches every worktree's folder so the app refreshes itself after edits or
-    /// terminal git commands; also follows the window's width, and the cursor while a
-    /// divider is dragged.
+    /// terminal git commands; also follows the window's width, the cursor while a
+    /// divider is dragged, and the diff's change shortcuts.
     pub fn subscription(&self) -> Subscription<Message> {
         // Always on, even without a workspace: the window reports its first size once,
         // when it opens.
@@ -1026,7 +1027,13 @@ impl App {
             Subscription::none()
         };
 
-        Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
+        Subscription::batch([
+            watch::subscription(paths),
+            spinner,
+            window_width,
+            drag,
+            diff::change_shortcuts(),
+        ])
     }
 
     /// iced's theme: asked for by iced (see main.rs), a cheap clone of a shared one.

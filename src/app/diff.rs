@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
+use iced::keyboard::{self, Key, key::Named};
 use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::scrollable::Direction;
 use iced::widget::text::{IntoFragment, LineHeight, Shaping, Span, Wrapping};
@@ -17,7 +18,7 @@ use iced::widget::{
 };
 use iced::{
     Alignment::Center,
-    Color, Element, Fill, Padding, Pixels, Radians, Rotation, Size, Task,
+    Color, Element, Fill, Padding, Pixels, Radians, Rotation, Size, Subscription, Task,
     alignment::{Horizontal::Right, Vertical},
 };
 use iced_palace::widget::ellipsized_text;
@@ -499,6 +500,28 @@ impl App {
             },
         )
     }
+}
+
+/// The change arrows' keyboard shortcuts, VS Code's: Alt+F5 jumps to the next change,
+/// Shift+Alt+F5 to the previous one (Option on a Mac), and held down they repeat. Only
+/// keys no widget used come through (see `keyboard::listen`): the commit box, even
+/// focused, leaves these alone (its key bindings have nothing for F5).
+pub(super) fn change_shortcuts() -> Subscription<Message> {
+    keyboard::listen().filter_map(|event| match event {
+        keyboard::Event::KeyPressed {
+            key: Key::Named(Named::F5),
+            modifiers,
+            ..
+        } if modifiers.alt() && !modifiers.control() && !modifiers.logo() => {
+            let step = if modifiers.shift() {
+                ChangeStep::Previous
+            } else {
+                ChangeStep::Next
+            };
+            Some(Message::JumpToChange(step))
+        }
+        _ => None,
+    })
 }
 
 /// Which of the header's previous / next change arrows can be clicked.

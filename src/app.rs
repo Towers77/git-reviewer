@@ -9,8 +9,10 @@ mod panels;
 mod popup;
 mod reveal;
 mod sidebar;
+mod slide;
 mod sticky;
 mod theme_menu;
+mod toast;
 mod watch;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -22,14 +24,10 @@ use std::sync::{Arc, LazyLock, mpsc};
 use std::thread;
 
 use iced::futures::channel::oneshot;
-use iced::widget::scrollable::Direction;
 use iced::widget::{
-    Container, button, column, container, opaque, row, rule, scrollable, space, stack, text,
-    text_editor,
+    Container, button, column, container, row, rule, space, stack, text, text_editor,
 };
-use iced::{
-    Alignment::Center, Animation, Color, Element, Fill, Padding, Subscription, Task, Theme, window,
-};
+use iced::{Alignment::Center, Animation, Color, Element, Fill, Subscription, Task, Theme, window};
 use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::{Duration, Instant};
 
@@ -44,6 +42,7 @@ use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
 use theme_menu::{ThemeDrafts, ThemeEdit};
+use toast::Toasts;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -124,8 +123,8 @@ pub enum Message {
         repo: PathBuf,
         hovered: bool,
     },
-    /// The error toast's close button was clicked.
-    DismissError,
+    /// A toast's close button was clicked, with the toast's id.
+    DismissToast(u64),
     /// The mouse went down on a divider between panels.
     DividerGrabbed(Divider),
     /// The cursor's x while a divider is dragged.
@@ -284,7 +283,8 @@ pub struct App {
     /// How far down the diff is scrolled, in pixels: only the lines around it are built
     /// (see `diff::chunk_layers`).
     diff_scroll_y: f32,
-    error: Option<AppError>,
+    /// The error toasts, shown or still leaving (see `toast`).
+    toasts: Toasts,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
     /// Set when the selected repo's base from the config doesn't resolve: Del. branch
@@ -326,7 +326,7 @@ impl App {
     /// The root comes from the command line when one is given (and is then remembered
     /// in the config), otherwise from the config.
     pub fn new() -> Self {
-        let mut error = None;
+        let mut errors = Vec::new();
         // Only an existing folder is used (and remembered): a typo on the command line
         // must not replace a good saved root.
         let cli_root = args()
@@ -335,7 +335,7 @@ impl App {
             .and_then(|path| match absolute(&path) {
                 Ok(path) if path.is_dir() => Some(path),
                 _ => {
-                    error = Some(AppError::Message(format!(
+                    errors.push(AppError::Message(format!(
                         "`{}` is not a folder; ignoring it",
                         path.display()
                     )));
@@ -350,7 +350,7 @@ impl App {
                 if cli_root.is_some() && config.root != cli_root {
                     config.root = cli_root.clone();
                     if let Err(err) = config.save() {
-                        error = Some(config_error(err));
+                        errors.push(config_error(err));
                     }
                 }
                 config
@@ -358,15 +358,14 @@ impl App {
             // An unreadable or invalid file is reported and left untouched (saving
             // over it would destroy whatever the user wrote); the app runs on defaults.
             Err(err) => {
-                error = Some(config_error(err));
+                errors.push(config_error(err));
                 Config::default()
             }
         };
 
         let (state, bad_theme) = State::load();
         if let Some(warning) = &bad_theme {
-            // The toast holds one message: a config or command-line error matters more.
-            error.get_or_insert_with(|| AppError::Message(warning.clone()));
+            errors.push(AppError::Message(warning.clone()));
         }
         let colors = Colors::new(&state.theme);
 
@@ -388,7 +387,7 @@ impl App {
             config_is_writable,
             diff: None,
             diff_scroll_y: 0.0,
-            error,
+            toasts: Toasts::default(),
             commit_message: text_editor::Content::new(),
             base_counts: None,
             base_error: None,
@@ -405,6 +404,9 @@ impl App {
             iced_theme: theme::app_theme(&colors),
             colors,
         };
+        for error in errors {
+            app.show_error(error);
+        }
         // Written now, so the file matches what the toast says.
         if bad_theme.is_some() {
             app.save_state("the default theme");
@@ -495,7 +497,7 @@ impl App {
         if self.config_is_writable {
             self.config.root = Some(root);
             if let Err(err) = self.config.save() {
-                self.error = Some(config_error(err));
+                self.show_error(config_error(err));
             }
         }
 
@@ -566,6 +568,7 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         self.now = Instant::now();
+        self.toasts.prune(self.now);
         let task = self.handle(message);
 
         // Many messages can load a diff (opening a file, staging, a refresh...), so a
@@ -589,7 +592,7 @@ impl App {
                 if matches!(message, Message::Refresh) {
                     match Config::load() {
                         Ok(config) => self.config.bases = config.bases,
-                        Err(err) => self.error = Some(config_error(err)),
+                        Err(err) => self.show_error(config_error(err)),
                     }
                     self.reported_base_error = None;
                 }
@@ -624,7 +627,7 @@ impl App {
                     }
                     Some(_) => {}
                     None => {
-                        self.error = Some(AppError::Message(
+                        self.show_error(AppError::Message(
                             "Refreshing stopped unexpectedly (an internal error)".to_string(),
                         ));
                     }
@@ -680,7 +683,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::WatchFailed(reason) => {
-                self.error = Some(AppError::Message(format!(
+                self.show_error(AppError::Message(format!(
                     "Auto-refresh unavailable ({reason}); use Refresh"
                 )));
             }
@@ -933,7 +936,7 @@ impl App {
                 self.state.sidebar.archived_open = !self.state.sidebar.archived_open;
                 self.save_state("the Archived list's state");
             }
-            Message::DismissError => self.error = None,
+            Message::DismissToast(id) => self.toasts.dismiss(id, self.now),
             Message::DividerGrabbed(divider) => {
                 self.dragging = Some((divider, self.state.panels));
             }
@@ -952,20 +955,24 @@ impl App {
         Task::none()
     }
 
-    /// Shows a failed action's error in the toast. Success leaves the toast alone: like
-    /// VS Code's error notifications, it stays until it's closed or a newer error
-    /// replaces it, so it can't vanish before it's read.
+    /// Shows a failed action's error in a toast. Success shows nothing: like VS Code's
+    /// error notifications, a toast stays until it's closed (or pushed out by newer
+    /// ones, see `toast::Toasts::push`), so it can't vanish before it's read.
     fn report<T>(&mut self, result: Result<T, GitError>) {
         if let Err(err) = result {
-            self.error = Some(err.into());
+            self.show_error(err.into());
         }
     }
 
-    /// Writes `state.toml`. A failure is shown in the toast, naming `what` wasn't saved;
+    fn show_error(&mut self, error: AppError) {
+        self.toasts.push(error.to_string(), self.now);
+    }
+
+    /// Writes `state.toml`. A failure is shown in a toast, naming `what` wasn't saved;
     /// the change still applies until the app closes.
     fn save_state(&mut self, what: &str) {
         if let Err(err) = self.state.save() {
-            self.error = Some(AppError::Message(format!("Couldn't save {what}: {err}")));
+            self.show_error(AppError::Message(format!("Couldn't save {what}: {err}")));
         }
     }
 
@@ -996,9 +1003,12 @@ impl App {
         paths.sort();
 
         // A message per frame only while a Sync/Publish runs or the diff is loading, to
-        // animate their spinners, or while a section folds; idle, the app draws nothing.
-        let moving =
-            self.remote_op.is_some() || self.diff_loading_for().is_some() || self.is_folding();
+        // animate their spinners, or while a section folds or a toast comes or goes;
+        // idle, the app draws nothing.
+        let moving = self.remote_op.is_some()
+            || self.diff_loading_for().is_some()
+            || self.is_folding()
+            || self.toasts.is_animating(self.now);
         let spinner = if moving {
             window::frames().map(|_| Message::Tick)
         } else {
@@ -1072,61 +1082,18 @@ impl App {
             body
         ];
 
-        // The toast floats over the window as a second layer, and while a divider is
+        // The toasts float over the window as a second layer, and while a divider is
         // dragged its overlay goes on top of everything. The window stays the first
         // layer either way, so its widgets keep their state (scroll offsets, the commit
-        // box's cursor) when a toast or a drag comes or goes.
+        // box's cursor) when the toasts or a drag come or go.
         let mut layers = stack![window].width(Fill).height(Fill);
-        if let Some(toast) = self.error_toast() {
-            layers = layers.push(toast);
+        if let Some(toasts) = self.toasts.view(c, self.now) {
+            layers = layers.push(toasts);
         }
         if self.dragging.is_some() {
             layers = layers.push(panels::drag_overlay());
         }
         layers.into()
-    }
-
-    /// The latest error, on a card in the bottom-right corner like VS Code's
-    /// notifications. It stays until its × is clicked or a newer error replaces it (see
-    /// `report`). A long message, like a hook's output, scrolls inside the card.
-    fn error_toast(&self) -> Option<Element<'_, Message>> {
-        let error = self.error.as_ref()?;
-        let c = &self.colors;
-
-        let message = scrollable(
-            container(text(error.to_string()).size(text_sizes::SMALL).width(Fill))
-                // Room for the scrollbar, which is drawn over the content.
-                .padding(Padding::ZERO.right(10.0)),
-        )
-        .direction(Direction::Vertical(theme::thin_scrollbar()))
-        .style(theme::scrollbar(c))
-        .width(Fill);
-
-        let card = container(
-            row![
-                // 2px down: centers the icon on the message's first line.
-                container(icon(icons::CIRCLE_ALERT, icon_sizes::BUTTON, c.danger))
-                    .padding(Padding::ZERO.top(2.0)),
-                message,
-                changes::icon_button(c, icons::X, Message::DismissError, false),
-            ]
-            .spacing(layouts::GAP),
-        )
-        .padding([10.0, 12.0])
-        .width(layouts::TOAST_WIDTH)
-        .max_height(layouts::TOAST_MAX_HEIGHT)
-        .style(theme::toast(c));
-
-        // `opaque`: in a stack, the mouse passes through to the layer below wherever the
-        // top layer has nothing interactive, so clicks on the message's text would land
-        // on whatever row is under the card. Outside the card they still do, on purpose.
-        Some(
-            container(opaque(card))
-                .align_right(Fill)
-                .align_bottom(Fill)
-                .padding(layouts::PANEL_PADDING_X)
-                .into(),
-        )
     }
 
     fn top_bar(&self) -> Element<'_, Message> {
@@ -1246,14 +1213,14 @@ impl App {
             }
             None => None,
         };
-        // Told in the toast once per broken base, not on every refresh (each file change
+        // Told in a toast once per broken base, not on every refresh (each file change
         // reads the status again), so closing the toast sticks. The Refresh button,
         // which re-reads the config, forgets it, so a base still broken is told again.
-        if let Some(problem) = &self.base_error
-            && self.reported_base_error.as_ref() != Some(problem)
+        if let Some(problem) = self.base_error.clone()
+            && self.reported_base_error.as_ref() != Some(&problem)
         {
-            self.error = Some(AppError::Message(problem.clone()));
-            self.reported_base_error = Some(problem.clone());
+            self.show_error(AppError::Message(problem.clone()));
+            self.reported_base_error = Some(problem);
         }
     }
 

@@ -736,10 +736,13 @@ pub fn filled_tag(text: Color, background: Color) -> impl Fn(&Theme) -> containe
 }
 
 /// The error toast's card: a step lighter than the panels under it, with a red border
-/// and a shadow to lift it off them.
-pub fn toast(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
-    let (background, border) = (c.hover, c.danger_border);
+/// and a shadow to lift it off them. `c` is already faded to `opacity` (see
+/// `Colors::faded`); the shadow, which isn't a theme color, fades by it here.
+pub fn toast(c: &Colors, opacity: f32) -> impl Fn(&Theme) -> container::Style + use<> {
+    let (background, border, text) = (c.hover, c.danger_border, c.text);
     move |_| container::Style {
+        // Set here so the message fades with the card, rather than taking the theme's.
+        text_color: Some(text),
         background: Some(background.into()),
         border: Border {
             color: border,
@@ -747,7 +750,7 @@ pub fn toast(c: &Colors) -> impl Fn(&Theme) -> container::Style + use<> {
             radius: radii::CONTROL.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4 * opacity),
             offset: Vector::new(0.0, 4.0),
             blur_radius: 16.0,
         },

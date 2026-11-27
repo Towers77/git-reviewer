@@ -449,6 +449,43 @@ impl Colors {
         }
     }
 
+    /// Every color made `opacity` as solid (1 unchanged, 0 invisible): a toast drawn
+    /// with them fades in or out as a whole, since iced has no opacity of its own.
+    pub fn faded(&self, opacity: f32) -> Colors {
+        let f = |color: Color| color.scale_alpha(opacity);
+        Colors {
+            light: self.light,
+            background: f(self.background),
+            panel: f(self.panel),
+            top_bar: f(self.top_bar),
+            border: f(self.border),
+            hover: f(self.hover),
+            control_border: f(self.control_border),
+            pill: f(self.pill),
+            scrollbar_hover: f(self.scrollbar_hover),
+            line_number: f(self.line_number),
+            text_dim: f(self.text_dim),
+            text_muted: f(self.text_muted),
+            text: f(self.text),
+            accent: f(self.accent),
+            on_accent: f(self.on_accent),
+            selected: f(self.selected),
+            selected_hover: f(self.selected_hover),
+            danger: f(self.danger),
+            danger_border: f(self.danger_border),
+            modified: f(self.modified),
+            added: f(self.added),
+            renamed: f(self.renamed),
+            deleted: f(self.deleted),
+            modified_chip: f(self.modified_chip),
+            added_chip: f(self.added_chip),
+            added_tint: f(self.added_tint),
+            removed_tint: f(self.removed_tint),
+            added_gutter: f(self.added_gutter),
+            removed_gutter: f(self.removed_gutter),
+        }
+    }
+
     /// A Catppuccin accent in this theme's flavor: for the repo badges.
     pub fn named(&self, accent: Accent) -> Color {
         accent.resolve(self.light).color()

@@ -1,4 +1,5 @@
-Catppuccin-Mocha.tmTheme is "Catppuccin Mocha.tmTheme" from https://github.com/catppuccin/bat
+Catppuccin-Mocha.tmTheme and Catppuccin-Latte.tmTheme are "Catppuccin Mocha.tmTheme" and
+"Catppuccin Latte.tmTheme" from https://github.com/catppuccin/bat
 (commit 6810349b28055dce54076712fc05fc68da4b8ec0), unmodified.
 
 MIT License

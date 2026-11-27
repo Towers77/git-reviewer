@@ -6,11 +6,16 @@ mod changes;
 mod diff;
 mod file_icon;
 mod panels;
+mod popup;
+mod reveal;
 mod sidebar;
+mod slide;
 mod sticky;
+mod theme_menu;
+mod toast;
 mod watch;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env::args;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
@@ -19,24 +24,25 @@ use std::sync::{Arc, LazyLock, mpsc};
 use std::thread;
 
 use iced::futures::channel::oneshot;
-use iced::widget::scrollable::Direction;
 use iced::widget::{
-    Container, button, column, container, opaque, row, rule, scrollable, space, stack, text,
-    text_editor,
+    Container, button, column, container, row, rule, space, stack, text, text_editor,
 };
-use iced::{Alignment::Center, Color, Element, Fill, Padding, Subscription, Task, window};
+use iced::{Alignment::Center, Animation, Color, Element, Fill, Subscription, Task, Theme, window};
 use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::{Duration, Instant};
 
 use crate::config::{Config, ConfigError};
 use crate::git::{ChangeKind, Diff, DiffSource, GitError, Repo, Status, Workspace, Worktree};
-use crate::highlight::LineColors;
+use crate::highlight::{Flavor, LineColors};
 use crate::state::State;
 use crate::theme::icons::{self, icon};
-use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
+use crate::theme::palette::Accent;
+use crate::theme::{self, Colors, fonts, icon_sizes, layouts, motion, text_sizes};
 use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
+use theme_menu::{ThemeDrafts, ThemeEdit};
+use toast::Toasts;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -96,8 +102,18 @@ pub enum Message {
     RemovalAnswered(RemovalPlan, bool),
     /// A section header was clicked: fold the section away, or open it again.
     ToggleSection(Section),
-    /// A repo's archive button was clicked, with the repo's folder.
+    /// "Archive repository" was clicked in a repo's menu, with the repo's folder.
     ArchiveRepo(PathBuf),
+    /// A repo's ⋯ button was clicked, with the repo's folder: open its menu, or close it.
+    RepoMenuToggled(PathBuf),
+    /// The top bar's theme button was clicked: open the theme menu, or close it.
+    ThemeMenuToggled,
+    /// The open menu was closed by a click outside it or Escape (see `popup`).
+    MenuDismissed,
+    /// A change in the theme menu.
+    Theme(ThemeEdit),
+    /// A color was picked in a repo's menu, for its badge.
+    RepoColorPicked(PathBuf, Accent),
     /// An archived repo's unarchive button was clicked, with the repo's folder.
     UnarchiveRepo(PathBuf),
     /// The sidebar's Archived header was clicked: open or close the list.
@@ -107,8 +123,8 @@ pub enum Message {
         repo: PathBuf,
         hovered: bool,
     },
-    /// The error toast's close button was clicked.
-    DismissError,
+    /// A toast's close button was clicked, with the toast's id.
+    DismissToast(u64),
     /// The mouse went down on a divider between panels.
     DividerGrabbed(Divider),
     /// The cursor's x while a divider is dragged.
@@ -116,6 +132,15 @@ pub enum Message {
     DividerReleased,
     /// The window's new width.
     WindowResized(f32),
+}
+
+/// A dropdown menu (see `popup`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenMenu {
+    /// A repo's ⋯ menu in the sidebar, by the repo's folder.
+    Repo(PathBuf),
+    /// The top bar's theme menu.
+    Theme,
 }
 
 /// A list section that folds away when its header is clicked, like VS Code's.
@@ -258,18 +283,32 @@ pub struct App {
     /// How far down the diff is scrolled, in pixels: only the lines around it are built
     /// (see `diff::chunk_layers`).
     diff_scroll_y: f32,
-    error: Option<AppError>,
+    /// The error toasts, shown or still leaving (see `toast`).
+    toasts: Toasts,
     commit_message: text_editor::Content,
     base_counts: Option<(String, (usize, usize))>,
-    /// Set when the selected repo's base from the config doesn't resolve. Kept apart
-    /// from `error` so it neither hides nor gets hidden by git errors.
+    /// Set when the selected repo's base from the config doesn't resolve: Del. branch
+    /// is then off. It's told in the toast; `reported_base_error` is the last one told,
+    /// kept across worktree switches so the same one isn't told again and again.
     base_error: Option<String>,
+    reported_base_error: Option<String>,
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
+    /// The folding of every section opened or closed since the app started (see
+    /// `fold`). A section that was never clicked has none: it's simply open or closed.
+    folds: HashMap<Section, Animation<bool>>,
+    /// When the message being handled came in: what animations are drawn at. Set by
+    /// `update`, so `view` draws every animation at the same moment.
+    now: Instant,
     /// The repo whose sidebar header is under the cursor, by folder: it shows its archive
     /// button in place of its worktree count.
     hovered_repo: Option<PathBuf>,
+    /// The dropdown that's open, if any: one at a time.
+    menu: Option<OpenMenu>,
+    /// What the theme menu's hex fields show: what's typed, which may not be a color
+    /// yet. Set from the theme whenever the menu opens or a pick changes it.
+    theme_drafts: ThemeDrafts,
     /// What's remembered between runs in `state.toml`: the panel widths the user dragged
     /// to (what's shown may be narrower: see `PanelWidths::fitted`).
     state: State,
@@ -278,12 +317,16 @@ pub struct App {
     dragging: Option<(Divider, PanelWidths)>,
     /// Infinite until the window first reports its size, which it does when it opens.
     window_width: f32,
+    /// Every color the UI draws with, worked out from `state.theme`, and iced's theme
+    /// made from them. Both are rebuilt only when the theme changes.
+    colors: Colors,
+    iced_theme: Theme,
 }
 impl App {
     /// The root comes from the command line when one is given (and is then remembered
     /// in the config), otherwise from the config.
     pub fn new() -> Self {
-        let mut error = None;
+        let mut errors = Vec::new();
         // Only an existing folder is used (and remembered): a typo on the command line
         // must not replace a good saved root.
         let cli_root = args()
@@ -292,7 +335,7 @@ impl App {
             .and_then(|path| match absolute(&path) {
                 Ok(path) if path.is_dir() => Some(path),
                 _ => {
-                    error = Some(AppError::Message(format!(
+                    errors.push(AppError::Message(format!(
                         "`{}` is not a folder; ignoring it",
                         path.display()
                     )));
@@ -307,7 +350,7 @@ impl App {
                 if cli_root.is_some() && config.root != cli_root {
                     config.root = cli_root.clone();
                     if let Err(err) = config.save() {
-                        error = Some(config_error(err));
+                        errors.push(config_error(err));
                     }
                 }
                 config
@@ -315,10 +358,16 @@ impl App {
             // An unreadable or invalid file is reported and left untouched (saving
             // over it would destroy whatever the user wrote); the app runs on defaults.
             Err(err) => {
-                error = Some(config_error(err));
+                errors.push(config_error(err));
                 Config::default()
             }
         };
+
+        let (state, bad_theme) = State::load();
+        if let Some(warning) = &bad_theme {
+            errors.push(AppError::Message(warning.clone()));
+        }
+        let colors = Colors::new(&state.theme);
 
         let mut app = App {
             workspace: Err(AppError::Message(String::new())), // replaced by the scan below
@@ -338,16 +387,30 @@ impl App {
             config_is_writable,
             diff: None,
             diff_scroll_y: 0.0,
-            error,
+            toasts: Toasts::default(),
             commit_message: text_editor::Content::new(),
             base_counts: None,
             base_error: None,
+            reported_base_error: None,
             collapsed: HashSet::new(),
+            folds: HashMap::new(),
+            now: Instant::now(),
             hovered_repo: None,
-            state: State::load(),
+            menu: None,
+            theme_drafts: ThemeDrafts::default(),
+            state,
             dragging: None,
             window_width: f32::INFINITY,
+            iced_theme: theme::app_theme(&colors),
+            colors,
         };
+        for error in errors {
+            app.show_error(error);
+        }
+        // Written now, so the file matches what the toast says.
+        if bad_theme.is_some() {
+            app.save_state("the default theme");
+        }
         app.scan_now();
         app
     }
@@ -434,7 +497,7 @@ impl App {
         if self.config_is_writable {
             self.config.root = Some(root);
             if let Err(err) = self.config.save() {
-                self.error = Some(config_error(err));
+                self.show_error(config_error(err));
             }
         }
 
@@ -462,6 +525,9 @@ impl App {
     fn scan_now(&mut self) {
         self.workspace = scan_root(self.root.as_deref(), &self.state.sidebar.archived);
         self.workspace_version += 1;
+        if matches!(self.menu, Some(OpenMenu::Repo(_))) {
+            self.menu = None;
+        }
     }
 
     /// Drops the result of a rescan that's running, and queues a fresh one: for changes
@@ -501,12 +567,15 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        self.now = Instant::now();
+        self.toasts.prune(self.now);
         let task = self.handle(message);
 
         // Many messages can load a diff (opening a file, staging, a refresh...), so a
         // new one's highlighting is started here, after any of them.
+        let flavor = Flavor::for_background(self.colors.light);
         match &mut self.diff {
-            Some(Ok(diff)) => match diff.start_highlighting() {
+            Some(Ok(diff)) => match diff.start_highlighting(flavor) {
                 Some(highlighting) => Task::batch([task, highlighting]),
                 None => task,
             },
@@ -523,8 +592,9 @@ impl App {
                 if matches!(message, Message::Refresh) {
                     match Config::load() {
                         Ok(config) => self.config.bases = config.bases,
-                        Err(err) => self.error = Some(config_error(err)),
+                        Err(err) => self.show_error(config_error(err)),
                     }
+                    self.reported_base_error = None;
                 }
                 return self.rescan();
             }
@@ -537,6 +607,16 @@ impl App {
                     // `workspace_version`).
                     Some(Scanned { version, workspace }) if version == self.workspace_version => {
                         self.workspace = Arc::unwrap_or_clone(workspace);
+                        // A repo's menu stays open only while the repo is still there;
+                        // else it would open by itself if the repo came back.
+                        if let Some(OpenMenu::Repo(open)) = &self.menu {
+                            let kept = self.workspace.as_ref().is_ok_and(|workspace| {
+                                workspace.repos().iter().any(|repo| repo.path() == open)
+                            });
+                            if !kept {
+                                self.menu = None;
+                            }
+                        }
                         // The selected worktree may be gone (removed outside the app).
                         let task = if self.selected_worktree().is_none() {
                             self.select_worktree(None)
@@ -547,7 +627,7 @@ impl App {
                     }
                     Some(_) => {}
                     None => {
-                        self.error = Some(AppError::Message(
+                        self.show_error(AppError::Message(
                             "Refreshing stopped unexpectedly (an internal error)".to_string(),
                         ));
                     }
@@ -603,7 +683,7 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::WatchFailed(reason) => {
-                self.error = Some(AppError::Message(format!(
+                self.show_error(AppError::Message(format!(
                     "Auto-refresh unavailable ({reason}); use Refresh"
                 )));
             }
@@ -776,9 +856,19 @@ impl App {
             }
             Message::ToggleSection(section) => {
                 // `remove` is false when it wasn't collapsed: then collapse it.
-                if !self.collapsed.remove(&section) {
-                    self.collapsed.insert(section);
+                let open = self.collapsed.remove(&section);
+                if !open {
+                    self.collapsed.insert(section.clone());
                 }
+                // From wherever it is: a click mid-fold turns it back from there.
+                self.folds
+                    .entry(section)
+                    .or_insert_with(|| {
+                        Animation::new(!open)
+                            .duration(motion::DURATION)
+                            .easing(motion::EASING)
+                    })
+                    .go_mut(open, self.now);
             }
             Message::ArchiveRepo(repo) => {
                 // An archived repo's worktrees aren't listed or refreshed any more, so
@@ -799,10 +889,11 @@ impl App {
                 }
                 self.invalidate_scans();
                 // Its row is gone, so its `on_exit` never comes: without this, the repo
-                // would come back from the Archived list showing its archive button.
+                // would come back from the Archived list showing its ⋯ button.
                 if self.hovered_repo.as_ref() == Some(&repo) {
                     self.hovered_repo = None;
                 }
+                self.menu = None;
                 self.state.sidebar.archived.insert(repo);
                 self.save_state("the archived repos");
                 return task;
@@ -832,11 +923,20 @@ impl App {
                     self.hovered_repo = None;
                 }
             }
+            Message::RepoMenuToggled(repo) => self.toggle_menu(OpenMenu::Repo(repo)),
+            Message::ThemeMenuToggled => self.toggle_menu(OpenMenu::Theme),
+            Message::MenuDismissed => self.menu = None,
+            Message::Theme(edit) => self.edit_theme(edit),
+            // The menu stays open, so the new pick shows in its swatches.
+            Message::RepoColorPicked(repo, color) => {
+                self.state.sidebar.repo_colors.insert(repo, color);
+                self.save_state("the repo's color");
+            }
             Message::ToggleArchived => {
                 self.state.sidebar.archived_open = !self.state.sidebar.archived_open;
                 self.save_state("the Archived list's state");
             }
-            Message::DismissError => self.error = None,
+            Message::DismissToast(id) => self.toasts.dismiss(id, self.now),
             Message::DividerGrabbed(divider) => {
                 self.dragging = Some((divider, self.state.panels));
             }
@@ -855,20 +955,24 @@ impl App {
         Task::none()
     }
 
-    /// Shows a failed action's error in the toast. Success leaves the toast alone: like
-    /// VS Code's error notifications, it stays until it's closed or a newer error
-    /// replaces it, so it can't vanish before it's read.
+    /// Shows a failed action's error in a toast. Success shows nothing: like VS Code's
+    /// error notifications, a toast stays until it's closed (or pushed out by newer
+    /// ones, see `toast::Toasts::push`), so it can't vanish before it's read.
     fn report<T>(&mut self, result: Result<T, GitError>) {
         if let Err(err) = result {
-            self.error = Some(err.into());
+            self.show_error(err.into());
         }
     }
 
-    /// Writes `state.toml`. A failure is shown in the toast, naming `what` wasn't saved;
+    fn show_error(&mut self, error: AppError) {
+        self.toasts.push(error.to_string(), self.now);
+    }
+
+    /// Writes `state.toml`. A failure is shown in a toast, naming `what` wasn't saved;
     /// the change still applies until the app closes.
     fn save_state(&mut self, what: &str) {
         if let Err(err) = self.state.save() {
-            self.error = Some(AppError::Message(format!("Couldn't save {what}: {err}")));
+            self.show_error(AppError::Message(format!("Couldn't save {what}: {err}")));
         }
     }
 
@@ -899,8 +1003,13 @@ impl App {
         paths.sort();
 
         // A message per frame only while a Sync/Publish runs or the diff is loading, to
-        // animate their spinners; idle, the app draws nothing.
-        let spinner = if self.remote_op.is_some() || self.diff_loading_for().is_some() {
+        // animate their spinners, or while a section folds or a toast comes or goes;
+        // idle, the app draws nothing.
+        let moving = self.remote_op.is_some()
+            || self.diff_loading_for().is_some()
+            || self.is_folding()
+            || self.toasts.is_animating(self.now);
+        let spinner = if moving {
             window::frames().map(|_| Message::Tick)
         } else {
             Subscription::none()
@@ -909,14 +1018,20 @@ impl App {
         Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
     }
 
+    /// iced's theme: asked for by iced (see main.rs), a cheap clone of a shared one.
+    pub fn theme(&self) -> Theme {
+        self.iced_theme.clone()
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
+        let c = &self.colors;
         let body: Element<'_, Message> = match &self.workspace {
             // No root yet, or it can't be read (moved, deleted): offer to pick one.
             Err(err) => {
                 let color = if self.root.is_some() {
-                    colors::DANGER
+                    c.danger
                 } else {
-                    colors::TEXT_MUTED
+                    c.text_muted
                 };
 
                 container(
@@ -931,7 +1046,7 @@ impl App {
                         .on_press(Message::ChooseRoot)
                         .height(layouts::PRIMARY_BUTTON_HEIGHT)
                         .padding([0.0, 16.0])
-                        .style(theme::primary_button),
+                        .style(theme::primary_button(c)),
                     ]
                     .align_x(Center),
                 )
@@ -946,12 +1061,12 @@ impl App {
                         container(self.sidebar(workspace))
                             .width(widths.sidebar)
                             .height(Fill),
-                        rule::vertical(1).style(theme::divider),
+                        rule::vertical(1).style(theme::divider(c)),
                         container(self.changes_panel())
                             .width(widths.changes)
                             .height(Fill)
-                            .style(|_| container::background(colors::SURFACE)),
-                        rule::vertical(1).style(theme::divider),
+                            .style(theme::background(c.panel)),
+                        rule::vertical(1).style(theme::divider(c)),
                         container(self.diff_panel()).width(Fill).height(Fill),
                     ]
                     .height(Fill),
@@ -963,17 +1078,17 @@ impl App {
 
         let window = column![
             self.top_bar(),
-            rule::horizontal(1).style(theme::divider),
+            rule::horizontal(1).style(theme::divider(c)),
             body
         ];
 
-        // The toast floats over the window as a second layer, and while a divider is
+        // The toasts float over the window as a second layer, and while a divider is
         // dragged its overlay goes on top of everything. The window stays the first
         // layer either way, so its widgets keep their state (scroll offsets, the commit
-        // box's cursor) when a toast or a drag comes or goes.
+        // box's cursor) when the toasts or a drag come or go.
         let mut layers = stack![window].width(Fill).height(Fill);
-        if let Some(toast) = self.error_toast() {
-            layers = layers.push(toast);
+        if let Some(toasts) = self.toasts.view(c, self.now) {
+            layers = layers.push(toasts);
         }
         if self.dragging.is_some() {
             layers = layers.push(panels::drag_overlay());
@@ -981,67 +1096,19 @@ impl App {
         layers.into()
     }
 
-    /// The latest error, on a card in the bottom-right corner like VS Code's
-    /// notifications. It stays until its × is clicked or a newer error replaces it (see
-    /// `report`). A long message, like a hook's output, scrolls inside the card.
-    fn error_toast(&self) -> Option<Element<'_, Message>> {
-        let error = self.error.as_ref()?;
-
-        let message = scrollable(
-            container(text(error.to_string()).size(text_sizes::SMALL).width(Fill))
-                // Room for the scrollbar, which is drawn over the content.
-                .padding(Padding::ZERO.right(10.0)),
-        )
-        .direction(Direction::Vertical(theme::thin_scrollbar()))
-        .style(theme::scrollbar)
-        .width(Fill);
-
-        let card = container(
-            row![
-                // 2px down: centers the icon on the message's first line.
-                container(icon(
-                    icons::CIRCLE_ALERT,
-                    icon_sizes::BUTTON,
-                    colors::DANGER
-                ))
-                .padding(Padding::ZERO.top(2.0)),
-                message,
-                changes::icon_button(icons::X, Message::DismissError, false),
-            ]
-            .spacing(layouts::GAP),
-        )
-        .padding([10.0, 12.0])
-        .width(layouts::TOAST_WIDTH)
-        .max_height(layouts::TOAST_MAX_HEIGHT)
-        .style(theme::toast);
-
-        // `opaque`: in a stack, the mouse passes through to the layer below wherever the
-        // top layer has nothing interactive, so clicks on the message's text would land
-        // on whatever row is under the card. Outside the card they still do, on purpose.
-        Some(
-            container(opaque(card))
-                .align_right(Fill)
-                .align_bottom(Fill)
-                .padding(layouts::PANEL_PADDING_X)
-                .into(),
-        )
-    }
-
     fn top_bar(&self) -> Element<'_, Message> {
+        let c = &self.colors;
         let bar_button = |icon_bytes: &'static [u8], label: &'static str, message: Message| {
             button(
-                row![
-                    icon(icon_bytes, icon_sizes::BUTTON, colors::TEXT),
-                    text(label)
-                ]
-                .spacing(6)
-                .height(Fill)
-                .align_y(Center),
+                row![icon(icon_bytes, icon_sizes::BUTTON, c.text), text(label)]
+                    .spacing(6)
+                    .height(Fill)
+                    .align_y(Center),
             )
             .on_press(message)
             .height(layouts::BUTTON_HEIGHT)
             .padding([0.0, 12.0])
-            .style(theme::outline_button)
+            .style(theme::outline_button(c))
         };
 
         container(
@@ -1060,12 +1127,13 @@ impl App {
                     // Same size as the title: in a centered row, text of different sizes
                     // sits at different baselines (~0.8px apart for 16 vs 14 in Segoe UI).
                     .size(text_sizes::TITLE)
-                    .color(colors::TEXT_MUTED),
+                    .color(c.text_muted),
                 )
                 .on_press(Message::ChooseRoot)
                 .padding([4.0, 8.0])
-                .style(theme::list_row(false)),
+                .style(theme::list_row(c, false)),
                 space().width(Fill),
+                self.theme_button(),
                 bar_button(icons::DOWNLOAD, "Fetch all", Message::FetchAll),
                 bar_button(icons::ROTATE_CW, "Refresh", Message::Refresh),
             ]
@@ -1075,7 +1143,7 @@ impl App {
         .height(layouts::TOP_BAR_HEIGHT)
         .padding([0.0, layouts::PANEL_PADDING_X])
         .align_y(Center)
-        .style(|_| container::background(colors::SURFACE))
+        .style(theme::background(c.top_bar))
         .into()
     }
 
@@ -1132,15 +1200,28 @@ impl App {
         self.base_counts = match loaded.base {
             Some((base, Ok(counts))) => Some((base, counts)),
             Some((base, Err(_))) => {
-                // A configured base that doesn't resolve is a typo in the config;
-                // say so instead of quietly dropping the "from base" line.
+                // A configured base that doesn't resolve is a typo in the config: say
+                // so, instead of quietly treating every branch as unmerged.
                 if loaded.base_is_configured {
-                    self.base_error = Some(format!("Base `{base}` from the config not found"));
+                    let repo = self.selected_repo().map_or("", |repo| repo.name());
+                    self.base_error = Some(format!(
+                        "Base `{base}` for {repo} in config.toml's [bases] not found, so \
+                         Del. branch stays off"
+                    ));
                 }
                 None
             }
             None => None,
         };
+        // Told in a toast once per broken base, not on every refresh (each file change
+        // reads the status again), so closing the toast sticks. The Refresh button,
+        // which re-reads the config, forgets it, so a base still broken is told again.
+        if let Some(problem) = self.base_error.clone()
+            && self.reported_base_error.as_ref() != Some(&problem)
+        {
+            self.show_error(AppError::Message(problem.clone()));
+            self.reported_base_error = Some(problem);
+        }
     }
 
     /// Runs a git action that changes the selected worktree (stage, unstage...) in
@@ -1268,6 +1349,22 @@ impl App {
 
     fn is_open(&self, section: &Section) -> bool {
         !self.collapsed.contains(section)
+    }
+
+    /// How far open `section` is drawn now: 0 folded away, 1 open, and in between (or
+    /// a little past either end, the easing's overshoot) while it folds.
+    fn fold(&self, section: &Section) -> f32 {
+        match self.folds.get(section) {
+            Some(animation) => animation.interpolate(0.0, 1.0, self.now),
+            None if self.is_open(section) => 1.0,
+            None => 0.0,
+        }
+    }
+
+    fn is_folding(&self) -> bool {
+        self.folds
+            .values()
+            .any(|animation| animation.is_animating(self.now))
     }
 
     fn selected_worktree(&self) -> Option<&Worktree> {

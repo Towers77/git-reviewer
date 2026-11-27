@@ -1,5 +1,6 @@
 //! Syntax highlighting for the diff: syntect, with two-face's syntaxes (about 200
-//! languages) and Catppuccin Mocha's colors (`assets/themes`).
+//! languages) and Catppuccin's colors (`assets/themes`): Mocha's on a dark background,
+//! Latte's on a light one.
 //!
 //! It takes a while on big files (about 0.35 s per 5000 lines), so
 //! it's meant to run once per diff, off the UI thread.
@@ -19,10 +20,35 @@ use crate::git::{Diff, DiffLine};
 /// match line ends correctly.
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
-static THEME: LazyLock<Theme> = LazyLock::new(|| {
-    let theme = include_bytes!("../assets/themes/Catppuccin-Mocha.tmTheme");
+static MOCHA: LazyLock<Theme> =
+    LazyLock::new(|| load(include_bytes!("../assets/themes/Catppuccin-Mocha.tmTheme")));
+static LATTE: LazyLock<Theme> =
+    LazyLock::new(|| load(include_bytes!("../assets/themes/Catppuccin-Latte.tmTheme")));
+
+fn load(theme: &[u8]) -> Theme {
     ThemeSet::load_from_reader(&mut Cursor::new(theme)).expect("the bundled theme parses")
-});
+}
+
+/// Which Catppuccin theme colors the code: the one made for the app's background
+/// (`Colors::light`). Each is parsed the first time it's used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flavor {
+    Mocha,
+    Latte,
+}
+
+impl Flavor {
+    pub fn for_background(light: bool) -> Flavor {
+        if light { Flavor::Latte } else { Flavor::Mocha }
+    }
+
+    fn theme(self) -> &'static Theme {
+        match self {
+            Flavor::Mocha => &MOCHA,
+            Flavor::Latte => &LATTE,
+        }
+    }
+}
 
 /// Lines longer than this (in bytes) are left uncolored, like VS Code does, so a
 /// minified file can't stall the highlighter. Skipping one doesn't break the lines
@@ -33,15 +59,16 @@ const MAX_LINE_LENGTH: usize = 20_000;
 /// its color. Empty for a line left uncolored.
 pub type LineColors = Vec<(Range<usize>, Color)>;
 
-/// The colors of every line of `diff`, in the same order as `diff.lines`, or `None` if
-/// `path` isn't in a language we highlight.
+/// The colors of every line of `diff` in `flavor`'s theme, in the same order as
+/// `diff.lines`, or `None` if `path` isn't in a language we highlight.
 ///
 /// Each side is highlighted as the whole file it is, so a line gets the colors it has
 /// in its own file (say, inside a comment that a removed line opened): removed lines
 /// from the old file (unchanged + removed lines), the rest from the new file (unchanged
 /// + added lines).
-pub fn diff_colors(path: &str, diff: &Diff) -> Option<Vec<LineColors>> {
+pub fn diff_colors(path: &str, diff: &Diff, flavor: Flavor) -> Option<Vec<LineColors>> {
     let syntax = syntax_for(path, first_line(diff))?;
+    let theme = flavor.theme();
 
     let mut colors = vec![LineColors::new(); diff.lines.len()];
     // The old file first, but only up to its last removed line: the lines after it are
@@ -53,8 +80,14 @@ pub fn diff_colors(path: &str, diff: &Diff) -> Option<Vec<LineColors>> {
         .rposition(|line| matches!(line, DiffLine::Removed { .. }))
         .map_or(0, |last| last + 1);
     let old_side = &diff.lines[..old_end];
-    highlight_side(syntax, old_side, DiffLine::old_number, &mut colors);
-    highlight_side(syntax, &diff.lines, DiffLine::new_number, &mut colors);
+    highlight_side(syntax, theme, old_side, DiffLine::old_number, &mut colors);
+    highlight_side(
+        syntax,
+        theme,
+        &diff.lines,
+        DiffLine::new_number,
+        &mut colors,
+    );
     Some(colors)
 }
 
@@ -87,11 +120,12 @@ fn syntax_for(path: &str, first_line: &str) -> Option<&'static SyntaxReference> 
 /// that side, in order. Each line's colors go at its index in `colors`.
 fn highlight_side(
     syntax: &SyntaxReference,
+    theme: &Theme,
     lines: &[DiffLine],
     number: fn(&DiffLine) -> Option<usize>,
     colors: &mut [LineColors],
 ) {
-    let mut highlighter = HighlightLines::new(syntax, &THEME);
+    let mut highlighter = HighlightLines::new(syntax, theme);
     let mut buffer = String::new();
 
     for (line, line_colors) in lines.iter().zip(colors) {
@@ -185,7 +219,24 @@ mod tests {
 
     #[test]
     fn test_unknown_languages_are_not_highlighted() {
-        assert!(diff_colors("notes.txt", &new_file(&["let a = 1;"])).is_none());
+        assert!(diff_colors("notes.txt", &new_file(&["let a = 1;"]), Flavor::Mocha).is_none());
+    }
+
+    #[test]
+    fn test_latte_colors_for_a_light_background() {
+        let colors =
+            diff_colors("x.rs", &new_file(&["let a = 1; // a"]), Flavor::Latte).expect("Rust");
+        // Latte's mauve and overlay2, the darker counterparts of Mocha's.
+        assert_eq!(
+            color_at(&colors[0], 0),
+            Some(Color::from_rgb8(0x88, 0x39, 0xef))
+        );
+        assert_eq!(
+            color_at(&colors[0], 12),
+            Some(Color::from_rgb8(0x7c, 0x7f, 0x93))
+        );
+        assert_eq!(Flavor::for_background(true), Flavor::Latte);
+        assert_eq!(Flavor::for_background(false), Flavor::Mocha);
     }
 
     #[test]
@@ -213,7 +264,7 @@ mod tests {
             ],
             binary: false,
         };
-        let colors = diff_colors("x.rs", &diff).expect("Rust");
+        let colors = diff_colors("x.rs", &diff, Flavor::Mocha).expect("Rust");
 
         assert_eq!(colors.len(), 4);
         // "old", in the comment the removed line opens.
@@ -228,7 +279,7 @@ mod tests {
     #[test]
     fn test_ranges_cover_each_line_exactly() {
         let lines = ["fn main() {", "\tlet s = \"héllo\"; // ✓", "", "}\r"];
-        let colors = diff_colors("x.rs", &new_file(&lines)).expect("Rust");
+        let colors = diff_colors("x.rs", &new_file(&lines), Flavor::Mocha).expect("Rust");
 
         for (line, colors) in lines.iter().zip(&colors) {
             let mut end = 0;
@@ -244,8 +295,8 @@ mod tests {
     #[test]
     fn test_long_lines_are_left_uncolored_without_breaking_the_rest() {
         let long = "x".repeat(MAX_LINE_LENGTH + 1);
-        let colors =
-            diff_colors("x.rs", &new_file(&["/* a", &long, "*/ let b = 2;"])).expect("Rust");
+        let lines = new_file(&["/* a", &long, "*/ let b = 2;"]);
+        let colors = diff_colors("x.rs", &lines, Flavor::Mocha).expect("Rust");
 
         assert!(colors[1].is_empty());
         // Still inside the comment the first line opened, which the third one closes.

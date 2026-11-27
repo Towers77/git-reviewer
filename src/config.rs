@@ -31,8 +31,8 @@ pub struct Config {
     /// The folder whose repos are shown. Set from the command line the first time;
     /// remembered so the app can be opened without arguments afterwards.
     pub root: Option<PathBuf>,
-    /// Per-repo (by folder name) base branch for the "↑N ↓M from base" line and the
-    /// Del. branch check, for repos whose `origin/HEAD` isn't the branch work merges into.
+    /// Per-repo (by folder name) base branch for the Del. branch check, for repos whose
+    /// `origin/HEAD` isn't the branch work merges into.
     pub bases: BTreeMap<String, String>,
 }
 

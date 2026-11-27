@@ -41,7 +41,7 @@ fn main() -> iced::Result {
         .font(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice())
         .font(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice())
         .font(include_bytes!("../assets/fonts/FiraCode-Regular.ttf").as_slice())
-        .theme(theme::app_theme())
+        .theme(App::theme)
         .run()
 }
 

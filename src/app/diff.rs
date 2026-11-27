@@ -23,9 +23,9 @@ use iced_palace::widget::ellipsized_text;
 use super::sticky::sticky;
 use super::{App, Message, empty_state, on_thread};
 use crate::git::{Diff, DiffLine, DiffSource};
-use crate::highlight::{self, LineColors};
+use crate::highlight::{self, Flavor, LineColors};
 use crate::theme::icons::{self, icon};
-use crate::theme::{self, colors, fonts, icon_sizes, layouts, text_sizes};
+use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
 
 // Diff geometry, from the mockup: two 44px line-number columns padded 8 and 10 on the
 // right, a 16px sign column, 24px after the code.
@@ -273,14 +273,26 @@ impl DiffView {
         self.next = Some(Box::new(next));
     }
 
-    /// The task that works out the code's syntax colors, on a thread of its own (see
-    /// `on_thread`), since that can take a while (up to 0.7 s for both sides of a
-    /// 5000-line file). `None` if there's nothing to start: it's already been started,
-    /// or it's not a language we highlight. The result comes back as
+    /// Colors the code again, after the theme went between dark and light: a fresh copy
+    /// of the newest version waits to replace this one (see `replace_when_highlighted`),
+    /// so the code stays on screen, in its old colors, until the new ones are in.
+    pub(super) fn highlight_again(&mut self) {
+        let newest = self.next.as_deref().unwrap_or(self);
+        let fresh = DiffView::new(&newest.path, newest.source, (*newest.diff).clone());
+        // Not a language we highlight: nothing would ever replace this one.
+        if fresh.is_loading() {
+            self.replace_when_highlighted(fresh);
+        }
+    }
+
+    /// The task that works out the code's syntax colors in `flavor`'s theme, on a thread
+    /// of its own (see `on_thread`), since that can take a while (up to 0.7 s for both
+    /// sides of a 5000-line file). `None` if there's nothing to start: it's already been
+    /// started, or it's not a language we highlight. The result comes back as
     /// `Message::DiffHighlighted`.
-    pub(super) fn start_highlighting(&mut self) -> Option<Task<Message>> {
+    pub(super) fn start_highlighting(&mut self, flavor: Flavor) -> Option<Task<Message>> {
         if let Some(next) = &mut self.next {
-            return next.start_highlighting();
+            return next.start_highlighting(flavor);
         }
         if self.highlighting != Highlighting::NotStarted {
             return None;
@@ -288,7 +300,7 @@ impl DiffView {
         self.highlighting = Highlighting::Running;
 
         let (path, diff) = (self.path.clone(), Arc::clone(&self.diff));
-        let work = move || highlight::diff_colors(&path, &diff);
+        let work = move || highlight::diff_colors(&path, &diff, flavor);
         let diff = Arc::clone(&self.diff);
         // A panicked thread leaves the code in the default text color.
         let done =
@@ -331,46 +343,42 @@ impl App {
     /// A header bar (path, which side, +N −N) over the scrollable diff. While the diff
     /// loads (it's read, then highlighted), the header is there and the body waits.
     pub(super) fn diff_panel(&self) -> Element<'_, Message> {
+        let c = &self.colors;
         let Some((path, source)) = &self.selected_file else {
             let clean = matches!(&self.status, Some(Ok(status)) if status.files.is_empty());
             return match (&self.status, clean) {
                 (None, _) => space().into(),
-                (Some(_), true) => empty_state(
-                    "Nothing to review. Everything is committed.",
-                    colors::TEXT_MUTED,
-                )
-                .center(Fill)
-                .into(),
-                (Some(_), false) => {
-                    empty_state("Select a file to see its changes", colors::TEXT_MUTED)
+                (Some(_), true) => {
+                    empty_state("Nothing to review. Everything is committed.", c.text_muted)
                         .center(Fill)
                         .into()
                 }
+                (Some(_), false) => empty_state("Select a file to see its changes", c.text_muted)
+                    .center(Fill)
+                    .into(),
             };
         };
 
         let (counts, body) = match (&self.diff, self.diff_loading_for()) {
             (Some(Err(err)), _) => {
-                return empty_state(err.to_string(), colors::DANGER)
-                    .center(Fill)
-                    .into();
+                return empty_state(err.to_string(), c.danger).center(Fill).into();
             }
             // A binary file has no lines to show (VS Code says so too).
             (Some(Ok(diff)), None) if diff.is_binary() => (
                 None,
-                empty_state("Binary file not shown", colors::TEXT_MUTED)
+                empty_state("Binary file not shown", c.text_muted)
                     .center(Fill)
                     .into(),
             ),
-            (Some(Ok(diff)), None) => (diff.counts(), diff_body(diff, self.diff_scroll_y)),
+            (Some(Ok(diff)), None) => (diff.counts(), diff_body(c, diff, self.diff_scroll_y)),
             // Highlighting: the counts are known. Still being read: they're not.
-            (Some(Ok(diff)), Some(elapsed)) => (diff.counts(), loading(elapsed)),
-            (None, elapsed) => (None, loading(elapsed.unwrap_or_default())),
+            (Some(Ok(diff)), Some(elapsed)) => (diff.counts(), loading(c, elapsed)),
+            (None, elapsed) => (None, loading(c, elapsed.unwrap_or_default())),
         };
 
         column![
-            diff_header(path, *source, counts),
-            rule::horizontal(1).style(theme::divider),
+            diff_header(c, path, *source, counts),
+            rule::horizontal(1).style(theme::divider(c)),
             body,
         ]
         .into()
@@ -426,14 +434,14 @@ const SPINNER_DELAY: Duration = Duration::from_millis(150);
 /// The diff's body while its code is loading (read, then highlighted: see
 /// `App::diff_loading_for`), `elapsed` in: empty at first (see `SPINNER_DELAY`), then a
 /// spinner turning once a second. `App::subscription` redraws it every frame meanwhile.
-fn loading<'a>(elapsed: Duration) -> Element<'a, Message> {
+fn loading<'a>(c: &Colors, elapsed: Duration) -> Element<'a, Message> {
     if elapsed < SPINNER_DELAY {
         return space().width(Fill).height(Fill).into();
     }
 
     let angle = elapsed.as_secs_f32() * TAU;
     container(
-        icon(icons::SPINNER, icon_sizes::SPINNER, colors::TEXT_MUTED)
+        icon(icons::SPINNER, icon_sizes::SPINNER, c.text_muted)
             .rotation(Rotation::Floating(Radians(angle))),
     )
     .center(Fill)
@@ -443,14 +451,16 @@ fn loading<'a>(elapsed: Duration) -> Element<'a, Message> {
 /// `counts` is (added, removed), or `None` while the diff is still being read, and for
 /// a binary file (see `DiffView::counts`).
 fn diff_header<'a>(
+    c: &Colors,
     path: &'a str,
     source: DiffSource,
     counts: Option<(usize, usize)>,
 ) -> Element<'a, Message> {
-    let side = match source {
-        DiffSource::Staged => "Staged",
-        DiffSource::Unstaged => "Unstaged",
-        DiffSource::Untracked => "Untracked",
+    // Tinted like the list's section it comes from: green for staged, yellow for changes.
+    let (side, color, background) = match source {
+        DiffSource::Staged => ("Staged", c.added, c.added_chip),
+        DiffSource::Unstaged => ("Unstaged", c.modified, c.modified_chip),
+        DiffSource::Untracked => ("Untracked", c.modified, c.modified_chip),
     };
 
     // Pushed piece by piece: a `None` child in `row!` would still take a gap.
@@ -460,7 +470,7 @@ fn diff_header<'a>(
             .wrapping(Wrapping::None),
         container(text(side).size(text_sizes::LABEL))
             .padding([1.0, 6.0])
-            .style(theme::filled_tag),
+            .style(theme::filled_tag(color, background)),
         space().width(Fill),
     ]
     .spacing(10)
@@ -470,12 +480,12 @@ fn diff_header<'a>(
             .push(
                 text(format!("+{added}"))
                     .size(text_sizes::SMALL)
-                    .color(colors::ADDED),
+                    .color(c.added),
             )
             .push(
                 text(format!("−{removed}"))
                     .size(text_sizes::SMALL)
-                    .color(colors::DANGER),
+                    .color(c.deleted),
             );
     }
 
@@ -494,7 +504,7 @@ fn diff_header<'a>(
 /// Lines don't wrap, so the code is as wide as its longest line (`DiffView::width`), or
 /// the panel if that's wider, so the tints run edge to edge. (Nothing can just be `Fill`:
 /// inside a both-ways scrollable that lays out empty.)
-fn diff_body(diff: &DiffView, scroll_y: f32) -> Element<'_, Message> {
+fn diff_body<'a>(c: &'a Colors, diff: &'a DiffView, scroll_y: f32) -> Element<'a, Message> {
     responsive(move |size| {
         let tint_width = diff.width.max(size.width) - GUTTER_WIDTH;
         // A fixed width, so the text's bounds don't change when the panel is resized:
@@ -505,11 +515,12 @@ fn diff_body(diff: &DiffView, scroll_y: f32) -> Element<'_, Message> {
         // In a `stack`, the first layer sets the size (here, the whole file's), and the
         // rest are drawn over it.
         let gutter = stack(
-            std::iter::once(column(diff.runs.iter().map(gutter_run)).into())
-                .chain(window.layers(&diff.chunks, gutter_chunk)),
+            std::iter::once(column(diff.runs.iter().map(|run| gutter_run(c, run))).into())
+                .chain(window.layers(&diff.chunks, |chunk| gutter_chunk(c, chunk))),
         );
+        let tints = diff.runs.iter().map(|run| code_tint(c, run, tint_width));
         let code = stack(
-            std::iter::once(column(diff.runs.iter().map(|run| code_tint(run, tint_width))).into())
+            std::iter::once(column(tints).into())
                 .chain(window.layers(&diff.chunks, |chunk| code_text(&chunk.code, code_width))),
         );
 
@@ -523,7 +534,7 @@ fn diff_body(diff: &DiffView, scroll_y: f32) -> Element<'_, Message> {
                 horizontal: theme::thin_scrollbar(),
             })
             .on_scroll(|viewport| Message::DiffScrolled(viewport.absolute_offset().y))
-            .style(theme::scrollbar)
+            .style(theme::scrollbar(c))
             .width(Fill)
             .height(Fill)
             .into()
@@ -594,13 +605,13 @@ fn lines_height(lines: usize) -> f32 {
 }
 
 /// One chunk's line numbers and signs.
-fn gutter_chunk(chunk: &Chunk) -> Element<'_, Message> {
+fn gutter_chunk<'a>(c: &Colors, chunk: &'a Chunk) -> Element<'a, Message> {
     row![
-        line_numbers(&chunk.old_numbers, OLD_NUMBER_PADDING),
-        line_numbers(&chunk.new_numbers, NEW_NUMBER_PADDING),
+        line_numbers(c, &chunk.old_numbers, OLD_NUMBER_PADDING),
+        line_numbers(c, &chunk.new_numbers, NEW_NUMBER_PADDING),
         stack![
-            mono(chunk.plus_signs.as_str()).color(colors::ADDED),
-            mono(chunk.minus_signs.as_str()).color(colors::DELETED),
+            mono(chunk.plus_signs.as_str()).color(c.added),
+            mono(chunk.minus_signs.as_str()).color(c.deleted),
         ]
         .width(layouts::DIFF_SIGN_WIDTH),
     ]
@@ -609,40 +620,40 @@ fn gutter_chunk(chunk: &Chunk) -> Element<'_, Message> {
 
 /// One run's stretch of the gutter background. It's opaque even for unchanged lines,
 /// since the sticky gutter covers code scrolled under it.
-fn gutter_run(run: &Run) -> Element<'_, Message> {
+fn gutter_run<'a>(c: &Colors, run: &Run) -> Element<'a, Message> {
     let background = match run.kind {
-        Kind::Context => colors::BACKGROUND,
-        Kind::Added => colors::ADDED_GUTTER,
-        Kind::Removed => colors::REMOVED_GUTTER,
+        Kind::Context => c.background,
+        Kind::Added => c.added_gutter,
+        Kind::Removed => c.removed_gutter,
     };
 
     container(space())
         .width(GUTTER_WIDTH)
         .height(lines_height(run.lines))
-        .style(move |_| container::background(background))
+        .style(theme::background(background))
         .into()
 }
 
 /// One run's tint behind the code.
-fn code_tint(run: &Run, width: f32) -> Element<'_, Message> {
+fn code_tint<'a>(c: &Colors, run: &Run, width: f32) -> Element<'a, Message> {
     let tint = match run.kind {
         Kind::Context => Color::TRANSPARENT,
-        Kind::Added => colors::ADDED_TINT,
-        Kind::Removed => colors::REMOVED_TINT,
+        Kind::Added => c.added_tint,
+        Kind::Removed => c.removed_tint,
     };
 
     container(space())
         .width(width)
         .height(lines_height(run.lines))
-        .style(move |_| container::background(tint))
+        .style(theme::background(tint))
         .into()
 }
 
 /// A column of line numbers, one per line, right-aligned.
-fn line_numbers(numbers: &str, padding_right: f32) -> Element<'_, Message> {
+fn line_numbers<'a>(c: &Colors, numbers: &'a str, padding_right: f32) -> Element<'a, Message> {
     container(
         mono(numbers)
-            .color(colors::LINE_NUMBER)
+            .color(c.line_number)
             .width(layouts::LINE_NUMBER_WIDTH)
             .align_x(Right),
     )
@@ -906,8 +917,8 @@ mod tests {
         assert!(!view.shows("main.rs", DiffSource::Unstaged, &diff()));
         assert!(!view.shows("lib.rs", DiffSource::Staged, &diff()));
         assert!(!view.shows("main.rs", DiffSource::Staged, &rust_diff("")));
-        assert!(view.start_highlighting().is_some());
-        assert!(view.start_highlighting().is_none());
+        assert!(view.start_highlighting(Flavor::Mocha).is_some());
+        assert!(view.start_highlighting(Flavor::Mocha).is_none());
         assert!(view.is_loading());
     }
 
@@ -930,7 +941,7 @@ mod tests {
         let mut view = DiffView::new("notes.txt", DiffSource::Unstaged, rust_diff("plain"));
 
         assert!(!view.is_loading());
-        assert!(view.start_highlighting().is_none());
+        assert!(view.start_highlighting(Flavor::Mocha).is_none());
     }
 
     #[test]
@@ -946,7 +957,7 @@ mod tests {
         assert!(Arc::ptr_eq(&view.diff, &old));
         assert!(view.shows("main.rs", source, &rust_diff("fn new() {}")));
         // Highlighting starts for the new version.
-        assert!(view.start_highlighting().is_some());
+        assert!(view.start_highlighting(Flavor::Mocha).is_some());
 
         // Stale colors (for the old version) change nothing.
         view.set_colors(&old, None);
@@ -957,6 +968,28 @@ mod tests {
         assert!(Arc::ptr_eq(&view.diff, &new));
         assert!(view.next.is_none());
         assert!(!view.is_loading());
+    }
+
+    #[test]
+    fn test_highlighting_again_keeps_the_code_on_screen_until_it_is_done() {
+        let source = DiffSource::Unstaged;
+        let mut view = DiffView::new("main.rs", source, rust_diff("fn main() {}"));
+        let shown = Arc::clone(&view.diff);
+        view.set_colors(&shown, None);
+
+        view.highlight_again();
+        assert!(!view.is_loading());
+        assert!(Arc::ptr_eq(&view.diff, &shown));
+        assert!(view.start_highlighting(Flavor::Latte).is_some());
+
+        let fresh = Arc::clone(&view.next.as_ref().expect("waiting").diff);
+        view.set_colors(&fresh, None);
+        assert!(Arc::ptr_eq(&view.diff, &fresh));
+
+        // Plain text is never highlighted, so there's nothing to wait for.
+        let mut plain = DiffView::new("notes.txt", source, rust_diff("plain"));
+        plain.highlight_again();
+        assert!(plain.next.is_none());
     }
 
     #[test]

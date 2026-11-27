@@ -42,7 +42,7 @@ use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
 use theme_menu::{ThemeDrafts, ThemeEdit};
-use toast::Toasts;
+use toast::{Kind as ToastKind, Toasts};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -78,7 +78,8 @@ pub enum Message {
     ChooseRoot,
     /// The picker closed: the chosen folder, or `None` if it was cancelled.
     RootChosen(Option<PathBuf>),
-    /// A frame passed while a Sync/Publish runs; only redraws the spinning icon.
+    /// A frame passed while something moves on its own (a spinner, a fold, a toast);
+    /// only redraws it.
     Tick,
     /// A discard button was clicked: ask for confirmation first.
     DiscardRequested(DiscardScope),
@@ -91,11 +92,14 @@ pub enum Message {
     CommitMessageEdited(text_editor::Action),
     Commit,
     FetchAll,
-    Fetched(Result<(), GitError>),
+    /// Fetch all is done: how many repos it fetched, and how it went.
+    Fetched(usize, Result<(), GitError>),
     Sync,
-    Synced(Result<(), GitError>),
+    /// A Sync or Publish is done: what its confirmation says (see
+    /// `App::remote_done_message`), and how it went.
+    Synced(String, Result<(), GitError>),
     Publish,
-    Published(Result<(), GitError>),
+    Published(String, Result<(), GitError>),
     /// A footer button (remove worktree / delete branch) was clicked.
     RemovalRequested(Removal),
     /// The confirmation for a worktree with uncommitted changes closed; `true` if yes.
@@ -568,6 +572,7 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         self.now = Instant::now();
+        self.toasts.expire(self.now);
         self.toasts.prune(self.now);
         let task = self.handle(message);
 
@@ -746,12 +751,16 @@ impl App {
             Message::FetchAll => {
                 if let Ok(workspace) = &self.workspace {
                     let repos = workspace.repos().to_vec();
+                    let count = repos.len();
                     return on_thread(move || Repo::fetch_all(&repos))
-                        .map(|result| Message::Fetched(or_crashed(result)));
+                        .map(move |result| Message::Fetched(count, or_crashed(result)));
                 }
             }
-            Message::Fetched(result) => {
-                self.report(result);
+            Message::Fetched(count, result) => {
+                match fetched_message(count) {
+                    Some(done) => self.confirm(result, done),
+                    None => self.report(result),
+                }
                 // `fetch --prune` can make upstreams gone in any worktree, so rescan
                 // everything rather than just the selected status.
                 return self.rescan();
@@ -761,28 +770,30 @@ impl App {
             Message::Sync if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Sync, Instant::now()));
+                    let done = self.remote_done_message(RemoteOp::Sync);
                     // In order: a pull changes the worktree, like staging does.
                     return in_order(move || worktree.sync())
-                        .map(|result| Message::Synced(or_crashed(result)));
+                        .map(move |result| Message::Synced(done.clone(), or_crashed(result)));
                 }
             }
-            Message::Synced(result) => {
+            Message::Synced(done, result) => {
                 self.remote_op = None;
-                self.report(result);
+                self.confirm(result, done);
                 return self.load_status();
             }
             Message::Publish if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Publish, Instant::now()));
+                    let done = self.remote_done_message(RemoteOp::Publish);
                     // Not in order: a push changes nothing in the worktree, so staging
                     // and committing needn't wait for the network.
                     return on_thread(move || worktree.publish())
-                        .map(|result| Message::Published(or_crashed(result)));
+                        .map(move |result| Message::Published(done.clone(), or_crashed(result)));
                 }
             }
-            Message::Published(result) => {
+            Message::Published(done, result) => {
                 self.remote_op = None;
-                self.report(result);
+                self.confirm(result, done);
                 return self.load_status();
             }
             Message::DiscardRequested(scope) => {
@@ -955,17 +966,48 @@ impl App {
         Task::none()
     }
 
-    /// Shows a failed action's error in a toast. Success shows nothing: like VS Code's
-    /// error notifications, a toast stays until it's closed (or pushed out by newer
-    /// ones, see `toast::Toasts::push`), so it can't vanish before it's read.
+    /// Shows a failed action's error in a toast. Success shows nothing (the actions
+    /// that confirm it use `confirm`). Like VS Code's error notifications, the toast
+    /// stays until it's closed (or pushed out by newer ones, see `toast::Toasts::push`),
+    /// so it can't vanish before it's read.
     fn report<T>(&mut self, result: Result<T, GitError>) {
         if let Err(err) = result {
             self.show_error(err.into());
         }
     }
 
+    /// Like `report`, for an action whose success is worth telling (a push, a fetch):
+    /// then `done` shows in a toast that closes itself.
+    fn confirm(&mut self, result: Result<(), GitError>, done: String) {
+        match result {
+            Ok(()) => self.toasts.push(ToastKind::Done, done, self.now),
+            Err(err) => self.show_error(err.into()),
+        }
+    }
+
+    /// What the selected worktree's Sync or Publish confirms once it's through. Worked
+    /// out when it's clicked, so it still names the right branch if the selection
+    /// changes while it runs.
+    fn remote_done_message(&self, op: RemoteOp) -> String {
+        let status = match &self.status {
+            Some(Ok(status)) => Some(status),
+            _ => None,
+        };
+        let branch = status
+            .and_then(|status| status.branch.as_deref())
+            .unwrap_or("HEAD");
+        match (op, status.and_then(|status| status.upstream.as_ref())) {
+            (RemoteOp::Publish, _) => format!("Published {branch} to origin."),
+            (RemoteOp::Sync, Some(upstream)) => {
+                format!("Synced {branch} with {}.", upstream.name)
+            }
+            (RemoteOp::Sync, None) => format!("Synced {branch}."),
+        }
+    }
+
     fn show_error(&mut self, error: AppError) {
-        self.toasts.push(error.to_string(), self.now);
+        self.toasts
+            .push(ToastKind::Error, error.to_string(), self.now);
     }
 
     /// Writes `state.toml`. A failure is shown in a toast, naming `what` wasn't saved;
@@ -1003,12 +1045,13 @@ impl App {
         paths.sort();
 
         // A message per frame only while a Sync/Publish runs or the diff is loading, to
-        // animate their spinners, or while a section folds or a toast comes or goes;
-        // idle, the app draws nothing.
+        // animate their spinners, while a section folds, or while a toast comes, goes
+        // or counts down (which also closes it in time, see `Toasts::expire`); idle,
+        // the app draws nothing.
         let moving = self.remote_op.is_some()
             || self.diff_loading_for().is_some()
             || self.is_folding()
-            || self.toasts.is_animating(self.now);
+            || self.toasts.is_moving(self.now);
         let spinner = if moving {
             window::frames().map(|_| Message::Tick)
         } else {
@@ -1396,6 +1439,15 @@ fn removal_question(plan: &RemovalPlan) -> String {
         count => format!("{count} uncommitted changes"),
     };
     format!("{action} Its {changes} will be lost.\n\n{WARNING}")
+}
+
+/// What Fetch all confirms once it's through `repos` repos; nothing with none.
+fn fetched_message(repos: usize) -> Option<String> {
+    match repos {
+        0 => None,
+        1 => Some("Fetched 1 repo.".to_string()),
+        count => Some(format!("Fetched all {count} repos.")),
+    }
 }
 
 /// The discard confirmation, saying exactly what the plan will lose.

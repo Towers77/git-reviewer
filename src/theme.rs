@@ -259,6 +259,9 @@ pub mod icons {
     pub const SPINNER: &[u8] = include_bytes!("../assets/icons/spinner.svg");
     pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
     pub const UNARCHIVE: &[u8] = include_bytes!("../assets/icons/archive-restore.svg");
+    /// The diff header's previous / next change buttons.
+    pub const ARROW_UP: &[u8] = include_bytes!("../assets/icons/arrow-up.svg");
+    pub const ARROW_DOWN: &[u8] = include_bytes!("../assets/icons/arrow-down.svg");
 
     /// A foldable section's chevron: pointing right while it's folded away (`shown` 0),
     /// turning down as it opens (1), along with the fold's animation.

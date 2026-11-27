@@ -4,22 +4,26 @@ use std::borrow::Cow;
 use std::f32::consts::TAU;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
+use iced::keyboard::{self, Key, key::Named};
+use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::scrollable::Direction;
 use iced::widget::text::{IntoFragment, LineHeight, Shaping, Span, Wrapping};
 use iced::widget::{
-    Text, column, container, responsive, rich_text, row, rule, scrollable, space, span, stack, text,
+    Id, Text, column, container, responsive, rich_text, row, rule, scrollable, sensor, space, span,
+    stack, text,
 };
 use iced::{
     Alignment::Center,
-    Color, Element, Fill, Padding, Pixels, Radians, Rotation, Size, Task,
+    Color, Element, Fill, Padding, Pixels, Radians, Rotation, Size, Subscription, Task,
     alignment::{Horizontal::Right, Vertical},
 };
 use iced_palace::widget::ellipsized_text;
 
+use super::changes::sized_icon_button;
 use super::sticky::sticky;
 use super::{App, Message, empty_state, on_thread};
 use crate::git::{Diff, DiffLine, DiffSource};
@@ -36,9 +40,31 @@ const GUTTER_WIDTH: f32 = layouts::LINE_NUMBER_WIDTH * 2.0
     + NEW_NUMBER_PADDING
     + layouts::DIFF_SIGN_WIDTH;
 const CODE_PADDING_RIGHT: f32 = 24.0;
+/// Room under the last line, so it doesn't sit on the panel's edge.
+const CODE_PADDING_BOTTOM: f32 = 8.0;
 
 /// How many diff lines go in one `Chunk`.
 const CHUNK_LINES: usize = 64;
+
+/// How many lines show above a change the header's arrows jump to (see
+/// `DiffView::change_target`): a hunk's usual context.
+const CHANGE_CONTEXT: usize = 3;
+
+/// The diff's scrollable, for the arrows' `scroll_to` (see `App::jump_to_change`).
+const SCROLLABLE: Id = Id::new("diff");
+
+/// A change jumped to lights up in the accent, this opaque, for `FLASH_HOLD`, then fades
+/// out over `FLASH_FADE` (see `flash_strength`), so it's clear which one it was.
+const FLASH_ALPHA: f32 = 0.3;
+const FLASH_HOLD: Duration = Duration::from_millis(150);
+const FLASH_FADE: Duration = Duration::from_millis(450);
+
+/// Which way the header's arrows jump between changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChangeStep {
+    Previous,
+    Next,
+}
 
 /// The selected file's diff, laid out the way `diff_body` draws it. `load_diff` builds
 /// it once per diff, so `view`, which runs after every message, does no per-line work.
@@ -64,6 +90,13 @@ pub(super) struct DiffView {
     removed: usize,
     chunks: Vec<Chunk>,
     runs: Vec<Run>,
+    /// The lines of each change, in order. A change is a run of added and removed lines
+    /// with no unchanged line in it, so an edited line (removed, then added) is one
+    /// change, as in VS Code. Hunks wouldn't do: the whole file is one.
+    changes: Vec<Range<usize>>,
+    /// The change last jumped to (an index into `changes`), and when: it flashes (see
+    /// `flash_at`). A new version of the diff starts without one.
+    flash: Option<(usize, Instant)>,
     /// How wide the rows must be to fit the longest line, gutter and padding included.
     width: f32,
     /// A binary file: a message is shown instead of lines (it has none).
@@ -227,6 +260,8 @@ impl DiffView {
             added,
             removed,
             chunks: chunks(&diff, None),
+            changes: changes(&runs),
+            flash: None,
             runs,
             width: content_width(&diff),
             binary: diff.binary,
@@ -263,6 +298,73 @@ impl DiffView {
     /// Whether it's a binary file, which has no lines to show.
     pub(super) fn is_binary(&self) -> bool {
         self.binary
+    }
+
+    /// Whether its lines are what `diff_panel` shows: highlighted, and not a binary file.
+    fn lines_are_shown(&self) -> bool {
+        !self.is_loading() && !self.binary
+    }
+
+    /// How far down the diff scrolls in a viewport `viewport_height` tall: as far as
+    /// iced lets it, its whole height (the lines and the room under them) less the
+    /// viewport's, or 0 if it fits.
+    fn max_scroll_y(&self, viewport_height: f32) -> f32 {
+        let height = lines_height(self.diff.lines.len()) + CODE_PADDING_BOTTOM;
+        (height - viewport_height).max(0.0)
+    }
+
+    /// Where to scroll to for the previous or next change from `scroll_y`, in a viewport
+    /// `viewport_height` tall: with the change `CHANGE_CONTEXT` lines from the top, or
+    /// scrolled to the bottom for one too near the end for that. `None` when there's no
+    /// change that way, or the bottom is reached already (every change left is then on
+    /// screen): its arrow is disabled. Comes with the change's index in `changes`.
+    fn change_target(
+        &self,
+        step: ChangeStep,
+        scroll_y: f32,
+        viewport_height: f32,
+    ) -> Option<(usize, f32)> {
+        // Offsets this close count as the same: the change just jumped to (fractional
+        // scroll offsets) isn't the next one again.
+        const SLACK: f32 = 0.5;
+        let max = self.max_scroll_y(viewport_height);
+        // A stale offset (the file got shorter) is wherever iced clamped it to.
+        let scroll_y = scroll_y.min(max);
+        let mut targets = self.changes.iter().enumerate().map(|(index, lines)| {
+            let y = lines_height(lines.start.saturating_sub(CHANGE_CONTEXT)).min(max);
+            (index, y)
+        });
+        match step {
+            ChangeStep::Previous => targets.rev().find(|&(_, y)| y < scroll_y - SLACK),
+            ChangeStep::Next => targets.find(|&(_, y)| y > scroll_y + SLACK),
+        }
+    }
+
+    /// Picks the change to jump to, as `change_target` does, and flashes it from `now`.
+    /// Returns where to scroll to, or `None` (and no flash) if there's nowhere to go.
+    fn jump_to_change(
+        &mut self,
+        step: ChangeStep,
+        scroll_y: f32,
+        viewport_height: f32,
+        now: Instant,
+    ) -> Option<f32> {
+        let (index, y) = self.change_target(step, scroll_y, viewport_height)?;
+        self.flash = Some((index, now));
+        Some(y)
+    }
+
+    /// The lines of the change jumped to last, and how strongly it's lit at `now` (see
+    /// `flash_strength`), while its flash lasts.
+    fn flash_at(&self, now: Instant) -> Option<(&Range<usize>, f32)> {
+        let (index, at) = self.flash?;
+        let strength = flash_strength(now.saturating_duration_since(at));
+        (strength > 0.0).then(|| (&self.changes[index], strength))
+    }
+
+    /// Whether a change is flashing at `now`, so the diff must be redrawn every frame.
+    pub(super) fn is_flashing(&self, now: Instant) -> bool {
+        self.flash_at(now).is_some()
     }
 
     /// Keeps this on screen until `next`, a newer version of the same diff, is
@@ -339,6 +441,31 @@ fn chunks(diff: &Diff, colors: Option<&[LineColors]>) -> Vec<Chunk> {
         .collect()
 }
 
+/// The lines of each change (see `DiffView::changes`): the runs of added or removed
+/// lines, with runs that touch (removed, then added) joined into one.
+fn changes(runs: &[Run]) -> Vec<Range<usize>> {
+    let mut changes: Vec<Range<usize>> = Vec::new();
+    let mut line = 0;
+    for run in runs {
+        let end = line + run.lines;
+        if run.kind != Kind::Context {
+            match changes.last_mut() {
+                Some(change) if change.end == line => change.end = end,
+                _ => changes.push(line..end),
+            }
+        }
+        line = end;
+    }
+    changes
+}
+
+/// How strongly a change jumped to is lit (1 fully, 0 not at all), `elapsed` after the
+/// jump: fully for `FLASH_HOLD`, then fading out evenly over `FLASH_FADE`.
+fn flash_strength(elapsed: Duration) -> f32 {
+    let fading = elapsed.saturating_sub(FLASH_HOLD).as_secs_f32() / FLASH_FADE.as_secs_f32();
+    1.0 - fading.min(1.0)
+}
+
 impl App {
     /// A header bar (path, which side, +N −N) over the scrollable diff. While the diff
     /// loads (it's read, then highlighted), the header is there and the body waits.
@@ -359,6 +486,21 @@ impl App {
             };
         };
 
+        // Only for a diff that's on screen, with changes to jump between.
+        let nav = self
+            .shown_diff()
+            .filter(|diff| !diff.changes.is_empty())
+            .map(|diff| {
+                let can_jump = |step| {
+                    diff.change_target(step, self.diff_scroll_y, self.diff_viewport_height)
+                        .is_some()
+                };
+                ChangeNav {
+                    previous: can_jump(ChangeStep::Previous),
+                    next: can_jump(ChangeStep::Next),
+                }
+            });
+
         let (counts, body) = match (&self.diff, self.diff_loading_for()) {
             (Some(Err(err)), _) => {
                 return empty_state(err.to_string(), c.danger).center(Fill).into();
@@ -370,19 +512,87 @@ impl App {
                     .center(Fill)
                     .into(),
             ),
-            (Some(Ok(diff)), None) => (diff.counts(), diff_body(c, diff, self.diff_scroll_y)),
+            (Some(Ok(diff)), None) => (
+                diff.counts(),
+                diff_body(c, diff, self.diff_scroll_y, self.now),
+            ),
             // Highlighting: the counts are known. Still being read: they're not.
             (Some(Ok(diff)), Some(elapsed)) => (diff.counts(), loading(c, elapsed)),
             (None, elapsed) => (None, loading(c, elapsed.unwrap_or_default())),
         };
 
         column![
-            diff_header(c, path, *source, counts),
+            diff_header(c, path, *source, counts, nav),
             rule::horizontal(1).style(theme::divider(c)),
             body,
         ]
         .into()
     }
+
+    /// The selected file's diff while its lines are on screen (see
+    /// `DiffView::lines_are_shown`).
+    fn shown_diff(&self) -> Option<&DiffView> {
+        match &self.diff {
+            Some(Ok(diff)) if diff.lines_are_shown() => Some(diff),
+            _ => None,
+        }
+    }
+
+    /// Scrolls the diff to the previous or next change (see `DiffView::change_target`),
+    /// if there's one that way, and flashes it.
+    pub(super) fn jump_to_change(&mut self, step: ChangeStep) -> Task<Message> {
+        let (scroll_y, viewport_height, now) =
+            (self.diff_scroll_y, self.diff_viewport_height, self.now);
+        let y = match &mut self.diff {
+            Some(Ok(diff)) if diff.lines_are_shown() => {
+                diff.jump_to_change(step, scroll_y, viewport_height, now)
+            }
+            _ => None,
+        };
+        let Some(y) = y else {
+            return Task::none();
+        };
+        // Set here rather than left to `Message::DiffScrolled`: the scrollable only
+        // reports its new offset when it next draws, so the lines around the target
+        // wouldn't be built for that frame. iced builds the view after `update`, then
+        // runs the scroll on it, then draws (checked in iced_winit's event loop).
+        self.diff_scroll_y = y;
+        operation::scroll_to(
+            SCROLLABLE,
+            AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
+    }
+}
+
+/// The change arrows' keyboard shortcuts, VS Code's: Alt+F5 jumps to the next change,
+/// Shift+Alt+F5 to the previous one (Option on a Mac), and held down they repeat. Only
+/// keys no widget used come through (see `keyboard::listen`): the commit box, even
+/// focused, leaves these alone (its key bindings have nothing for F5).
+pub(super) fn change_shortcuts() -> Subscription<Message> {
+    keyboard::listen().filter_map(|event| match event {
+        keyboard::Event::KeyPressed {
+            key: Key::Named(Named::F5),
+            modifiers,
+            ..
+        } if modifiers.alt() && !modifiers.control() && !modifiers.logo() => {
+            let step = if modifiers.shift() {
+                ChangeStep::Previous
+            } else {
+                ChangeStep::Next
+            };
+            Some(Message::JumpToChange(step))
+        }
+        _ => None,
+    })
+}
+
+/// Which of the header's previous / next change arrows can be clicked.
+struct ChangeNav {
+    previous: bool,
+    next: bool,
 }
 
 /// How wide the diff's rows must be to fit its longest line, gutter and padding
@@ -449,12 +659,14 @@ fn loading<'a>(c: &Colors, elapsed: Duration) -> Element<'a, Message> {
 }
 
 /// `counts` is (added, removed), or `None` while the diff is still being read, and for
-/// a binary file (see `DiffView::counts`).
+/// a binary file (see `DiffView::counts`). `nav` says which change arrows can be
+/// clicked, or is `None` to leave them out.
 fn diff_header<'a>(
     c: &Colors,
     path: &'a str,
     source: DiffSource,
     counts: Option<(usize, usize)>,
+    nav: Option<ChangeNav>,
 ) -> Element<'a, Message> {
     // Tinted like the list's section it comes from: green for staged, yellow for changes.
     let (side, color, background) = match source {
@@ -488,6 +700,26 @@ fn diff_header<'a>(
                     .color(c.deleted),
             );
     }
+    if let Some(nav) = nav {
+        // An arrow with nowhere to go has no `on_press`, so it's drawn disabled.
+        let arrow = |bytes, step, enabled: bool| {
+            sized_icon_button(
+                c,
+                bytes,
+                enabled.then_some(Message::JumpToChange(step)),
+                false,
+                layouts::ICON_BUTTON,
+                icon_sizes::ROW,
+            )
+        };
+        content = content.push(
+            row![
+                arrow(icons::ARROW_UP, ChangeStep::Previous, nav.previous),
+                arrow(icons::ARROW_DOWN, ChangeStep::Next, nav.next),
+            ]
+            .spacing(2),
+        );
+    }
 
     container(content)
         .height(layouts::DIFF_HEADER_HEIGHT)
@@ -499,12 +731,19 @@ fn diff_header<'a>(
 /// The whole file, scrollable both ways: the gutter (line numbers and signs) and the
 /// code, each the visible chunks' texts over a column of tint blocks (see `DiffView`).
 /// The gutter stays at the left edge when scrolled sideways. `scroll_y` is how far down
-/// it's scrolled, which decides the chunks that are built.
+/// it's scrolled, which decides the chunks that are built. A change just jumped to
+/// flashes, at `now`'s strength, over the tints and under the text.
 ///
 /// Lines don't wrap, so the code is as wide as its longest line (`DiffView::width`), or
 /// the panel if that's wider, so the tints run edge to edge. (Nothing can just be `Fill`:
 /// inside a both-ways scrollable that lays out empty.)
-fn diff_body<'a>(c: &'a Colors, diff: &'a DiffView, scroll_y: f32) -> Element<'a, Message> {
+fn diff_body<'a>(
+    c: &'a Colors,
+    diff: &'a DiffView,
+    scroll_y: f32,
+    now: Instant,
+) -> Element<'a, Message> {
+    let flash = diff.flash_at(now);
     responsive(move |size| {
         let tint_width = diff.width.max(size.width) - GUTTER_WIDTH;
         // A fixed width, so the text's bounds don't change when the panel is resized:
@@ -515,12 +754,17 @@ fn diff_body<'a>(c: &'a Colors, diff: &'a DiffView, scroll_y: f32) -> Element<'a
         // In a `stack`, the first layer sets the size (here, the whole file's), and the
         // rest are drawn over it.
         let gutter = stack(
-            std::iter::once(column(diff.runs.iter().map(|run| gutter_run(c, run))).into())
-                .chain(window.layers(&diff.chunks, |chunk| gutter_chunk(c, chunk))),
+            [
+                column(diff.runs.iter().map(|run| gutter_run(c, run))).into(),
+                flash_layer(c, flash, GUTTER_WIDTH),
+            ]
+            .into_iter()
+            .chain(window.layers(&diff.chunks, |chunk| gutter_chunk(c, chunk))),
         );
         let tints = diff.runs.iter().map(|run| code_tint(c, run, tint_width));
         let code = stack(
-            std::iter::once(column(tints).into())
+            [column(tints).into(), flash_layer(c, flash, tint_width)]
+                .into_iter()
                 .chain(window.layers(&diff.chunks, |chunk| code_text(&chunk.code, code_width))),
         );
 
@@ -528,15 +772,23 @@ fn diff_body<'a>(c: &'a Colors, diff: &'a DiffView, scroll_y: f32) -> Element<'a
         // put when the code is scrolled sideways.
         let content = stack![row![space().width(GUTTER_WIDTH), code], sticky(gutter)];
 
-        scrollable(container(content).padding(Padding::ZERO.bottom(8.0)))
-            .direction(Direction::Both {
-                vertical: theme::thin_scrollbar(),
-                horizontal: theme::thin_scrollbar(),
-            })
-            .on_scroll(|viewport| Message::DiffScrolled(viewport.absolute_offset().y))
-            .style(theme::scrollbar(c))
-            .width(Fill)
-            .height(Fill)
+        let body =
+            scrollable(container(content).padding(Padding::ZERO.bottom(CODE_PADDING_BOTTOM)))
+                .id(SCROLLABLE)
+                .direction(Direction::Both {
+                    vertical: theme::thin_scrollbar(),
+                    horizontal: theme::thin_scrollbar(),
+                })
+                .on_scroll(|viewport| Message::DiffScrolled(viewport.absolute_offset().y))
+                .style(theme::scrollbar(c))
+                .width(Fill)
+                .height(Fill);
+
+        // Reports the viewport's height, which with the diff's own tells how far down
+        // it scrolls (see `DiffView::max_scroll_y`): when it's first drawn, and on every
+        // resize. `on_scroll` can't tell: iced never calls it for a diff that fits.
+        sensor(body)
+            .on_resize(|size| Message::DiffResized(size.height))
             .into()
     })
     .into()
@@ -597,6 +849,30 @@ impl ChunkWindow {
         }
         layers
     }
+}
+
+/// A flashing change's block (see `DiffView::flash_at`), `width` wide and moved down to
+/// its lines, in the accent at the flash's strength; or nothing when no change flashes.
+/// It's a stack layer even when empty, so the chunk layers after it keep their places
+/// and their shaped text (see `ChunkWindow`).
+fn flash_layer<'a>(
+    c: &Colors,
+    flash: Option<(&Range<usize>, f32)>,
+    width: f32,
+) -> Element<'a, Message> {
+    let Some((lines, strength)) = flash else {
+        return space().into();
+    };
+    let color = c.accent.scale_alpha(FLASH_ALPHA * strength);
+
+    container(
+        container(space())
+            .width(width)
+            .height(lines_height(lines.len()))
+            .style(theme::background(color)),
+    )
+    .padding(Padding::ZERO.top(lines_height(lines.start)))
+    .into()
 }
 
 /// The height of `lines` diff lines.
@@ -815,6 +1091,159 @@ mod tests {
         assert_eq!(chunk.minus_signs, "\n−\n−\n\n");
         let runs: Vec<_> = view.runs.iter().map(|run| run.lines).collect();
         assert_eq!(runs, vec![1, 2, 1, 1]);
+    }
+
+    /// A diff `len` lines long where the lines at `added` (indexes) are added, and the
+    /// rest unchanged.
+    fn diff_with_added(len: usize, added: &[usize]) -> Diff {
+        let lines = (0..len)
+            .map(|index| {
+                let text = index.to_string();
+                if added.contains(&index) {
+                    DiffLine::Added { new: index, text }
+                } else {
+                    DiffLine::Context {
+                        old: index,
+                        new: index,
+                        text,
+                    }
+                }
+            })
+            .collect();
+        Diff {
+            lines,
+            binary: false,
+        }
+    }
+
+    #[test]
+    fn test_a_change_is_a_run_of_changed_lines() {
+        // The edited lines 1–3 (removed, then added) are one change; 5 is another.
+        let diff = Diff {
+            lines: vec![
+                DiffLine::Context {
+                    old: 1,
+                    new: 1,
+                    text: String::new(),
+                },
+                DiffLine::Removed {
+                    old: 2,
+                    text: String::new(),
+                },
+                DiffLine::Removed {
+                    old: 3,
+                    text: String::new(),
+                },
+                DiffLine::Added {
+                    new: 2,
+                    text: String::new(),
+                },
+                DiffLine::Context {
+                    old: 4,
+                    new: 3,
+                    text: String::new(),
+                },
+                DiffLine::Added {
+                    new: 4,
+                    text: String::new(),
+                },
+            ],
+            binary: false,
+        };
+        let view = DiffView::new("x", DiffSource::Unstaged, diff);
+        assert_eq!(view.changes, vec![1..4, 5..6]);
+
+        // A new file is one change, all of it; an unchanged one has none.
+        let new_file = DiffView::new("x", DiffSource::Untracked, diff_with_added(3, &[0, 1, 2]));
+        assert_eq!(new_file.changes, vec![0..3]);
+        let unchanged = DiffView::new("x", DiffSource::Unstaged, diff_with_added(3, &[]));
+        assert!(unchanged.changes.is_empty());
+    }
+
+    #[test]
+    fn test_change_targets_step_through_changes_and_stop_at_the_ends() {
+        use ChangeStep::{Next, Previous};
+        // 200 lines, changed at 2 (too near the top for 3 lines of context), 50, and
+        // 198 (too near the bottom to reach the top), in a viewport 10 lines tall.
+        let view = DiffView::new(
+            "x",
+            DiffSource::Unstaged,
+            diff_with_added(200, &[2, 50, 198]),
+        );
+        let viewport = lines_height(10);
+        let bottom = lines_height(200) + CODE_PADDING_BOTTOM - viewport;
+        let middle = lines_height(50 - CHANGE_CONTEXT);
+        let target = |step, scroll_y| view.change_target(step, scroll_y, viewport).map(|(_, y)| y);
+
+        // The target comes with its change, the one that flashes.
+        assert_eq!(view.change_target(Next, 0.0, viewport), Some((1, middle)));
+        // Scrolled to the bottom for the last one: still that one.
+        assert_eq!(
+            view.change_target(Next, middle, viewport),
+            Some((2, bottom))
+        );
+        // At the top, the first change is on screen already.
+        assert_eq!(target(Next, 0.0), Some(middle));
+        assert_eq!(target(Previous, 0.0), None);
+        assert_eq!(target(Next, middle), Some(bottom));
+        // A fraction of a pixel off the change just jumped to still counts as on it.
+        assert_eq!(target(Next, middle + 0.3), Some(bottom));
+        assert_eq!(target(Previous, middle + 0.3), Some(0.0));
+        // At the bottom, nothing is further down.
+        assert_eq!(target(Next, bottom), None);
+        assert_eq!(target(Previous, bottom), Some(middle));
+        // Between changes: the ones on either side.
+        assert_eq!(target(Previous, middle + 100.0), Some(middle));
+        // A stale offset past the bottom counts as the bottom.
+        assert_eq!(target(Next, bottom * 2.0), None);
+        assert_eq!(target(Previous, bottom * 2.0), Some(middle));
+
+        // A diff that fits doesn't scroll, so there's nowhere to jump to.
+        let tall = lines_height(500);
+        assert_eq!(view.change_target(Next, 0.0, tall), None);
+        assert_eq!(view.change_target(Previous, 0.0, tall), None);
+    }
+
+    #[test]
+    fn test_flash_holds_then_fades_out() {
+        assert_eq!(flash_strength(Duration::ZERO), 1.0);
+        assert_eq!(flash_strength(FLASH_HOLD), 1.0);
+        let halfway = flash_strength(FLASH_HOLD + FLASH_FADE / 2);
+        assert!((halfway - 0.5).abs() < 1e-3, "{halfway}");
+        assert_eq!(flash_strength(FLASH_HOLD + FLASH_FADE), 0.0);
+        assert_eq!(flash_strength(FLASH_HOLD + FLASH_FADE * 3), 0.0);
+    }
+
+    #[test]
+    fn test_a_jump_flashes_the_change_it_lands_on() {
+        // An edit at lines 50–51 (removed, then added), in 200 lines.
+        let mut lines = diff_with_added(200, &[51]).lines;
+        lines[50] = DiffLine::Removed {
+            old: 50,
+            text: String::new(),
+        };
+        let diff = Diff {
+            lines,
+            binary: false,
+        };
+        let mut view = DiffView::new("x", DiffSource::Unstaged, diff);
+        let (viewport, now) = (lines_height(10), Instant::now());
+        assert!(!view.is_flashing(now));
+
+        let y = view.jump_to_change(ChangeStep::Next, 0.0, viewport, now);
+        assert_eq!(y, Some(lines_height(50 - CHANGE_CONTEXT)));
+        assert_eq!(view.flash_at(now), Some((&(50..52), 1.0)));
+        let over = now + FLASH_HOLD + FLASH_FADE;
+        assert!(view.is_flashing(over - Duration::from_millis(1)));
+        assert!(!view.is_flashing(over));
+
+        // Nowhere to go: no jump, and no new flash.
+        let later = over + Duration::from_secs(1);
+        assert_eq!(
+            view.jump_to_change(ChangeStep::Previous, 0.0, viewport, later),
+            None
+        );
+        assert!(!view.is_flashing(later));
     }
 
     #[test]

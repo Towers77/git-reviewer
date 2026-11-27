@@ -42,7 +42,7 @@ use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
 use theme_menu::{ThemeDrafts, ThemeEdit};
-use toast::{Kind as ToastKind, Toasts};
+use toast::{Confirmation, Kind as ToastKind, Toasts, Topic};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -96,10 +96,10 @@ pub enum Message {
     Fetched(usize, Result<(), GitError>),
     Sync,
     /// A Sync or Publish is done: what its confirmation says (see
-    /// `App::remote_done_message`), and how it went.
-    Synced(String, Result<(), GitError>),
+    /// `App::remote_confirmation`), and how it went.
+    Synced(Confirmation, Result<(), GitError>),
     Publish,
-    Published(String, Result<(), GitError>),
+    Published(Confirmation, Result<(), GitError>),
     /// A footer button (remove worktree / delete branch) was clicked.
     RemovalRequested(Removal),
     /// The confirmation for a worktree with uncommitted changes closed; `true` if yes.
@@ -129,6 +129,10 @@ pub enum Message {
     },
     /// A toast's close button was clicked, with the toast's id.
     DismissToast(u64),
+    /// The mouse went onto (`true`) or off a toast, with the toast's id.
+    ToastHovered(u64, bool),
+    /// The window gained (`true`) or lost focus.
+    WindowFocused(bool),
     /// The mouse went down on a divider between panels.
     DividerGrabbed(Divider),
     /// The cursor's x while a divider is dragged.
@@ -758,7 +762,13 @@ impl App {
             }
             Message::Fetched(count, result) => {
                 match fetched_message(count) {
-                    Some(done) => self.confirm(result, done),
+                    Some(message) => {
+                        let done = Confirmation {
+                            message,
+                            about: Topic::FetchAll,
+                        };
+                        self.confirm(result, done);
+                    }
                     None => self.report(result),
                 }
                 // `fetch --prune` can make upstreams gone in any worktree, so rescan
@@ -770,7 +780,7 @@ impl App {
             Message::Sync if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Sync, Instant::now()));
-                    let done = self.remote_done_message(RemoteOp::Sync);
+                    let done = self.remote_confirmation(RemoteOp::Sync, worktree.path());
                     // In order: a pull changes the worktree, like staging does.
                     return in_order(move || worktree.sync())
                         .map(move |result| Message::Synced(done.clone(), or_crashed(result)));
@@ -784,7 +794,7 @@ impl App {
             Message::Publish if self.remote_op.is_none() => {
                 if let Some(worktree) = self.selected_worktree().cloned() {
                     self.remote_op = Some((RemoteOp::Publish, Instant::now()));
-                    let done = self.remote_done_message(RemoteOp::Publish);
+                    let done = self.remote_confirmation(RemoteOp::Publish, worktree.path());
                     // Not in order: a push changes nothing in the worktree, so staging
                     // and committing needn't wait for the network.
                     return on_thread(move || worktree.publish())
@@ -948,6 +958,8 @@ impl App {
                 self.save_state("the Archived list's state");
             }
             Message::DismissToast(id) => self.toasts.dismiss(id, self.now),
+            Message::ToastHovered(id, hovered) => self.toasts.hover(id, hovered, self.now),
+            Message::WindowFocused(focused) => self.toasts.set_focused(focused, self.now),
             Message::DividerGrabbed(divider) => {
                 self.dragging = Some((divider, self.state.panels));
             }
@@ -977,18 +989,20 @@ impl App {
     }
 
     /// Like `report`, for an action whose success is worth telling (a push, a fetch):
-    /// then `done` shows in a toast that closes itself.
-    fn confirm(&mut self, result: Result<(), GitError>, done: String) {
-        match result {
-            Ok(()) => self.toasts.push(ToastKind::Done, done, self.now),
-            Err(err) => self.show_error(err.into()),
-        }
+    /// then `done` shows in a toast that closes itself, and closes the error the same
+    /// action left open last time. The error, if it fails again, is about it too.
+    fn confirm(&mut self, result: Result<(), GitError>, done: Confirmation) {
+        let (kind, message) = match result {
+            Ok(()) => (ToastKind::Done, done.message),
+            Err(err) => (ToastKind::Error, AppError::from(err).to_string()),
+        };
+        self.toasts.push(kind, message, Some(done.about), self.now);
     }
 
-    /// What the selected worktree's Sync or Publish confirms once it's through. Worked
-    /// out when it's clicked, so it still names the right branch if the selection
-    /// changes while it runs.
-    fn remote_done_message(&self, op: RemoteOp) -> String {
+    /// What the Sync or Publish of `worktree` (the selected one) confirms once it's
+    /// through. Worked out when it's clicked, so it still names the right branch if the
+    /// selection changes while it runs.
+    fn remote_confirmation(&self, op: RemoteOp, worktree: &Path) -> Confirmation {
         let status = match &self.status {
             Some(Ok(status)) => Some(status),
             _ => None,
@@ -996,18 +1010,22 @@ impl App {
         let branch = status
             .and_then(|status| status.branch.as_deref())
             .unwrap_or("HEAD");
-        match (op, status.and_then(|status| status.upstream.as_ref())) {
+        let message = match (op, status.and_then(|status| status.upstream.as_ref())) {
             (RemoteOp::Publish, _) => format!("Published {branch} to origin."),
             (RemoteOp::Sync, Some(upstream)) => {
                 format!("Synced {branch} with {}.", upstream.name)
             }
             (RemoteOp::Sync, None) => format!("Synced {branch}."),
+        };
+        Confirmation {
+            message,
+            about: Topic::Remote(worktree.to_path_buf()),
         }
     }
 
     fn show_error(&mut self, error: AppError) {
         self.toasts
-            .push(ToastKind::Error, error.to_string(), self.now);
+            .push(ToastKind::Error, error.to_string(), None, self.now);
     }
 
     /// Writes `state.toml`. A failure is shown in a toast, naming `what` wasn't saved;
@@ -1030,8 +1048,10 @@ impl App {
             None => Subscription::none(),
         };
 
+        let focus = toast::window_focus();
+
         let Ok(workspace) = &self.workspace else {
-            return Subscription::batch([window_width, drag]);
+            return Subscription::batch([window_width, drag, focus]);
         };
 
         let mut paths: Vec<PathBuf> = workspace
@@ -1058,7 +1078,13 @@ impl App {
             Subscription::none()
         };
 
-        Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
+        Subscription::batch([
+            watch::subscription(paths),
+            spinner,
+            window_width,
+            drag,
+            focus,
+        ])
     }
 
     /// iced's theme: asked for by iced (see main.rs), a cheap clone of a shared one.

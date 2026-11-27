@@ -518,7 +518,7 @@ pub(super) fn icon_button<'a>(
     sized_icon_button(
         c,
         bytes,
-        message,
+        Some(message),
         on_selected_row,
         layouts::ICON_BUTTON,
         icon_sizes::ROW,
@@ -526,10 +526,11 @@ pub(super) fn icon_button<'a>(
 }
 
 /// `icon_button` at another size: a `size`-square button holding an `icon_size` icon.
+/// With no `on_press` it's disabled, and its icon is faded.
 pub(super) fn sized_icon_button<'a>(
     c: &Colors,
     bytes: &'static [u8],
-    message: Message,
+    on_press: Option<Message>,
     on_selected_row: bool,
     size: f32,
     icon_size: f32,
@@ -540,8 +541,14 @@ pub(super) fn sized_icon_button<'a>(
     let before = ((size - icon_size) / 2.0).floor();
     let after = size - icon_size - before;
 
-    button(icon(bytes, icon_size, c.text_muted))
-        .on_press(message)
+    // Faded here: the disabled style (`theme::icon_button`) fades the button's text
+    // color, but an icon has its own color, which that doesn't reach. By half, as there.
+    // With `opacity`, not the color's alpha: iced draws an SVG in its color's red, green
+    // and blue only (checked in iced_wgpu's and iced_tiny_skia's SVG rasterizing).
+    let opacity: f32 = if on_press.is_some() { 1.0 } else { 0.5 };
+
+    button(icon(bytes, icon_size, c.text_muted).opacity(opacity))
+        .on_press_maybe(on_press)
         .width(size)
         .height(size)
         .padding(Padding {

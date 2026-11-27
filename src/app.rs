@@ -38,7 +38,7 @@ use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::palette::Accent;
 use crate::theme::{self, Colors, fonts, icon_sizes, layouts, motion, text_sizes};
-use diff::DiffView;
+use diff::{ChangeStep, DiffView};
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
 use theme_menu::{ThemeDrafts, ThemeEdit};
@@ -53,6 +53,11 @@ pub enum Message {
     },
     /// The diff was scrolled; how far down it is now, in pixels.
     DiffScrolled(f32),
+    /// The diff's scrolling area was drawn at a new height, in pixels.
+    DiffResized(f32),
+    /// A previous / next change arrow in the diff's header was clicked, or its shortcut
+    /// pressed (see `diff::change_shortcuts`).
+    JumpToChange(ChangeStep),
     /// The syntax colors of a diff's lines are worked out (see
     /// `DiffView::start_highlighting`); `None` if it's not a language we highlight.
     DiffHighlighted(Arc<Diff>, Option<Vec<LineColors>>),
@@ -283,6 +288,10 @@ pub struct App {
     /// How far down the diff is scrolled, in pixels: only the lines around it are built
     /// (see `diff::chunk_layers`).
     diff_scroll_y: f32,
+    /// How tall the diff's scrolling area is, as last drawn (0 until it's first drawn):
+    /// with the diff's own height, it tells how far down it scrolls, for the header's
+    /// change arrows. It's the panel's, not the file's, so a new file keeps it.
+    diff_viewport_height: f32,
     /// The error toasts, shown or still leaving (see `toast`).
     toasts: Toasts,
     commit_message: text_editor::Content,
@@ -387,6 +396,7 @@ impl App {
             config_is_writable,
             diff: None,
             diff_scroll_y: 0.0,
+            diff_viewport_height: 0.0,
             toasts: Toasts::default(),
             commit_message: text_editor::Content::new(),
             base_counts: None,
@@ -714,6 +724,8 @@ impl App {
                 return self.load_diff();
             }
             Message::DiffScrolled(y) => self.diff_scroll_y = y,
+            Message::DiffResized(height) => self.diff_viewport_height = height,
+            Message::JumpToChange(step) => return self.jump_to_change(step),
             Message::DiffHighlighted(diff, colors) => {
                 if let Some(Ok(view)) = &mut self.diff {
                     view.set_colors(&diff, colors.as_deref());
@@ -977,8 +989,8 @@ impl App {
     }
 
     /// Watches every worktree's folder so the app refreshes itself after edits or
-    /// terminal git commands; also follows the window's width, and the cursor while a
-    /// divider is dragged.
+    /// terminal git commands; also follows the window's width, the cursor while a
+    /// divider is dragged, and the diff's change shortcuts.
     pub fn subscription(&self) -> Subscription<Message> {
         // Always on, even without a workspace: the window reports its first size once,
         // when it opens.
@@ -1003,19 +1015,26 @@ impl App {
         paths.sort();
 
         // A message per frame only while a Sync/Publish runs or the diff is loading, to
-        // animate their spinners, or while a section folds or a toast comes or goes;
-        // idle, the app draws nothing.
+        // animate their spinners, or while a section folds, a toast comes or goes, or a
+        // change jumped to flashes; idle, the app draws nothing.
         let moving = self.remote_op.is_some()
             || self.diff_loading_for().is_some()
             || self.is_folding()
-            || self.toasts.is_animating(self.now);
+            || self.toasts.is_animating(self.now)
+            || matches!(&self.diff, Some(Ok(diff)) if diff.is_flashing(self.now));
         let spinner = if moving {
             window::frames().map(|_| Message::Tick)
         } else {
             Subscription::none()
         };
 
-        Subscription::batch([watch::subscription(paths), spinner, window_width, drag])
+        Subscription::batch([
+            watch::subscription(paths),
+            spinner,
+            window_width,
+            drag,
+            diff::change_shortcuts(),
+        ])
     }
 
     /// iced's theme: asked for by iced (see main.rs), a cheap clone of a shared one.

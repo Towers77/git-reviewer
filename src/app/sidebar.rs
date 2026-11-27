@@ -142,7 +142,7 @@ fn sidebar_button<'a>(c: &Colors, bytes: &'static [u8], message: Message) -> But
     sized_icon_button(
         c,
         bytes,
-        message,
+        Some(message),
         false,
         layouts::SIDEBAR_ICON_BUTTON,
         icon_sizes::SIDEBAR_BUTTON,

@@ -63,6 +63,15 @@ pub mod layouts {
     /// A repo's badge (its initials on its color): wider than tall, for two letters.
     pub const BADGE_WIDTH: f32 = 24.0;
     pub const BADGE_HEIGHT: f32 = 18.0;
+    /// Room under a badge's initials, which lifts them: measured on Windows (screenshot,
+    /// counting pixel rows), Segoe UI Bold's caps at 10px are 7 rows, centered at 6 rows
+    /// above and 5 below. An odd height can't split evenly in 18, so this makes it 5 and
+    /// 6: a hair high, like the count chips' digits (4 and 5, as they are), which reads
+    /// as centered. Not measured on macOS, so left alone there.
+    #[cfg(target_os = "windows")]
+    pub const BADGE_TEXT_LIFT: f32 = 2.0;
+    #[cfg(not(target_os = "windows"))]
+    pub const BADGE_TEXT_LIFT: f32 = 0.0;
     /// Count chips (the sidebar's change counts): a fixed height, text centered in it.
     pub const CHIP_HEIGHT: f32 = 18.0;
     /// The repo menu, and its color swatches (a ring around a dot when picked).

@@ -371,6 +371,7 @@ pub(super) fn badge<'a>(c: &Colors, name: &str, color: Accent) -> Element<'a, Me
     )
     .width(layouts::BADGE_WIDTH)
     .height(layouts::BADGE_HEIGHT)
+    .padding(Padding::ZERO.bottom(layouts::BADGE_TEXT_LIFT))
     .align_x(Center)
     .align_y(Center)
     .style(theme::badge(c.named(color)))

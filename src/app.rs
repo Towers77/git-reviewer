@@ -7,12 +7,13 @@ mod diff;
 mod file_icon;
 mod panels;
 mod popup;
+mod reveal;
 mod sidebar;
 mod sticky;
 mod theme_menu;
 mod watch;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env::args;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
@@ -26,7 +27,9 @@ use iced::widget::{
     Container, button, column, container, opaque, row, rule, scrollable, space, stack, text,
     text_editor,
 };
-use iced::{Alignment::Center, Color, Element, Fill, Padding, Subscription, Task, Theme, window};
+use iced::{
+    Alignment::Center, Animation, Color, Element, Fill, Padding, Subscription, Task, Theme, window,
+};
 use rfd::{MessageButtons, MessageDialogResult, MessageLevel};
 use std::time::{Duration, Instant};
 
@@ -36,7 +39,7 @@ use crate::highlight::{Flavor, LineColors};
 use crate::state::State;
 use crate::theme::icons::{self, icon};
 use crate::theme::palette::Accent;
-use crate::theme::{self, Colors, fonts, icon_sizes, layouts, text_sizes};
+use crate::theme::{self, Colors, fonts, icon_sizes, layouts, motion, text_sizes};
 use diff::DiffView;
 use panels::Divider;
 pub use panels::{PanelWidths, min_window_width};
@@ -292,6 +295,12 @@ pub struct App {
     /// Sections folded away by the user; every other section is open. Kept while the
     /// app runs, across worktree switches, like VS Code (not saved to the config).
     collapsed: HashSet<Section>,
+    /// The folding of every section opened or closed since the app started (see
+    /// `fold`). A section that was never clicked has none: it's simply open or closed.
+    folds: HashMap<Section, Animation<bool>>,
+    /// When the message being handled came in: what animations are drawn at. Set by
+    /// `update`, so `view` draws every animation at the same moment.
+    now: Instant,
     /// The repo whose sidebar header is under the cursor, by folder: it shows its archive
     /// button in place of its worktree count.
     hovered_repo: Option<PathBuf>,
@@ -385,6 +394,8 @@ impl App {
             base_error: None,
             reported_base_error: None,
             collapsed: HashSet::new(),
+            folds: HashMap::new(),
+            now: Instant::now(),
             hovered_repo: None,
             menu: None,
             theme_drafts: ThemeDrafts::default(),
@@ -554,6 +565,7 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        self.now = Instant::now();
         let task = self.handle(message);
 
         // Many messages can load a diff (opening a file, staging, a refresh...), so a
@@ -841,9 +853,19 @@ impl App {
             }
             Message::ToggleSection(section) => {
                 // `remove` is false when it wasn't collapsed: then collapse it.
-                if !self.collapsed.remove(&section) {
-                    self.collapsed.insert(section);
+                let open = self.collapsed.remove(&section);
+                if !open {
+                    self.collapsed.insert(section.clone());
                 }
+                // From wherever it is: a click mid-fold turns it back from there.
+                self.folds
+                    .entry(section)
+                    .or_insert_with(|| {
+                        Animation::new(!open)
+                            .duration(motion::DURATION)
+                            .easing(motion::EASING)
+                    })
+                    .go_mut(open, self.now);
             }
             Message::ArchiveRepo(repo) => {
                 // An archived repo's worktrees aren't listed or refreshed any more, so
@@ -974,8 +996,10 @@ impl App {
         paths.sort();
 
         // A message per frame only while a Sync/Publish runs or the diff is loading, to
-        // animate their spinners; idle, the app draws nothing.
-        let spinner = if self.remote_op.is_some() || self.diff_loading_for().is_some() {
+        // animate their spinners, or while a section folds; idle, the app draws nothing.
+        let moving =
+            self.remote_op.is_some() || self.diff_loading_for().is_some() || self.is_folding();
+        let spinner = if moving {
             window::frames().map(|_| Message::Tick)
         } else {
             Subscription::none()
@@ -1358,6 +1382,22 @@ impl App {
 
     fn is_open(&self, section: &Section) -> bool {
         !self.collapsed.contains(section)
+    }
+
+    /// How far open `section` is drawn now: 0 folded away, 1 open, and in between (or
+    /// a little past either end, the easing's overshoot) while it folds.
+    fn fold(&self, section: &Section) -> f32 {
+        match self.folds.get(section) {
+            Some(animation) => animation.interpolate(0.0, 1.0, self.now),
+            None if self.is_open(section) => 1.0,
+            None => 0.0,
+        }
+    }
+
+    fn is_folding(&self) -> bool {
+        self.folds
+            .values()
+            .any(|animation| animation.is_animating(self.now))
     }
 
     fn selected_worktree(&self) -> Option<&Worktree> {

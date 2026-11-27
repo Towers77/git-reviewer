@@ -114,6 +114,75 @@ pub mod layouts {
     pub const ARCHIVED_LIST_MAX_HEIGHT: f32 = 180.0;
 }
 
+/// How things open and close: quick, with a slight overshoot before they settle.
+pub mod motion {
+    use std::time::Duration;
+
+    use iced::animation::Easing;
+
+    pub const DURATION: Duration = Duration::from_millis(240);
+    /// CSS's `cubic-bezier(0.34, 1.4, 0.64, 1)`, the curve picked on the design board:
+    /// it runs a few percent past the end (4–10%, checked in the tests) before settling.
+    pub const EASING: Easing = Easing::Custom(overshoot);
+
+    fn overshoot(x: f32) -> f32 {
+        cubic_bezier(0.34, 1.4, 0.64, 1.0, x)
+    }
+
+    /// A CSS cubic Bézier timing curve through (0, 0) and (1, 1) with control points
+    /// (x1, y1) and (x2, y2), at time `x`: Newton's method finds the curve's `t` whose
+    /// x is `x`, then that `t`'s y is the progress.
+    fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        let at = |a: f32, b: f32, t: f32| {
+            let u = 1.0 - t;
+            3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+        };
+        let slope = |a: f32, b: f32, t: f32| {
+            let u = 1.0 - t;
+            3.0 * u * u * a + 6.0 * u * t * (b - a) + 3.0 * t * t * (1.0 - b)
+        };
+
+        let mut t = x;
+        for _ in 0..8 {
+            let error = at(x1, x2, t) - x;
+            let d = slope(x1, x2, t);
+            if error.abs() < 1e-5 || d.abs() < 1e-6 {
+                break;
+            }
+            t = (t - error / d).clamp(0.0, 1.0);
+        }
+        at(y1, y2, t)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_overshoot_runs_past_the_end_then_settles() {
+            assert_eq!(overshoot(0.0), 0.0);
+            assert!((overshoot(1.0) - 1.0).abs() < 1e-4);
+            let peak = (0..=100)
+                .map(|i| overshoot(i as f32 / 100.0))
+                .fold(0.0, f32::max);
+            assert!(peak > 1.04 && peak < 1.1, "{peak}");
+            // Rising throughout the first half.
+            assert!(overshoot(0.25) < overshoot(0.5));
+        }
+
+        #[test]
+        fn test_a_straight_curve_is_linear() {
+            for i in 0..=10 {
+                let x = i as f32 / 10.0;
+                assert!(
+                    (cubic_bezier(1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, x) - x).abs() < 1e-3
+                );
+            }
+        }
+    }
+}
+
 pub mod radii {
     pub const CONTROL: f32 = 6.0;
     pub const TAG: f32 = 4.0;
@@ -155,7 +224,7 @@ pub mod fonts {
 
 pub mod icons {
     use iced::{
-        Color,
+        Color, Radians, Rotation,
         widget::{Svg, svg},
     };
 
@@ -164,7 +233,6 @@ pub mod icons {
     pub const CHECK: &[u8] = include_bytes!("../assets/icons/check.svg");
     pub const SYNC: &[u8] = include_bytes!("../assets/icons/sync.svg");
     pub const DISCARD: &[u8] = include_bytes!("../assets/icons/discard.svg");
-    pub const CHEVRON_DOWN: &[u8] = include_bytes!("../assets/icons/chevron-down.svg");
     pub const CHEVRON_RIGHT: &[u8] = include_bytes!("../assets/icons/chevron-right.svg");
     pub const GIT_BRANCH: &[u8] = include_bytes!("../assets/icons/git-branch.svg");
     /// The branch icon with its curve cut: a worktree whose upstream is gone.
@@ -182,10 +250,13 @@ pub mod icons {
     pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
     pub const UNARCHIVE: &[u8] = include_bytes!("../assets/icons/archive-restore.svg");
 
-    /// A foldable section's chevron: down while it's open, right while it's collapsed.
-    pub fn chevron<'a>(c: &super::Colors, open: bool) -> Svg<'a> {
-        let bytes = if open { CHEVRON_DOWN } else { CHEVRON_RIGHT };
-        icon(bytes, super::icon_sizes::CHEVRON, c.text_muted)
+    /// A foldable section's chevron: pointing right while it's folded away (`shown` 0),
+    /// turning down as it opens (1), along with the fold's animation.
+    pub fn chevron<'a>(c: &super::Colors, shown: f32) -> Svg<'a> {
+        // One icon turned, rather than a down and a right one, so it can turn in steps.
+        let angle = Radians(shown * std::f32::consts::FRAC_PI_2);
+        icon(CHEVRON_RIGHT, super::icon_sizes::CHEVRON, c.text_muted)
+            .rotation(Rotation::Floating(angle))
     }
 
     pub fn icon<'a>(bytes: &'static [u8], size: f32, color: Color) -> Svg<'a> {

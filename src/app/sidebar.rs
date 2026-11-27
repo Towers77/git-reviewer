@@ -14,6 +14,7 @@ use iced_palace::widget::ellipsized_text;
 
 use super::changes::sized_icon_button;
 use super::popup::popup;
+use super::reveal::reveal;
 use super::{App, Message, OpenMenu, Section};
 use crate::git::{Repo, Workspace, Worktree};
 use crate::theme::icons::{self, chevron, icon};
@@ -83,7 +84,9 @@ impl App {
 
         let header = button(
             row![
-                chevron(c, open),
+                // Not animated: the list is pinned to the bottom, so it would push the
+                // repos above it around instead of folding.
+                chevron(c, if open { 1.0 } else { 0.0 }),
                 theme::label(c, &format!("ARCHIVED · {}", archived.len())),
             ]
             .spacing(6)
@@ -153,7 +156,7 @@ impl App {
     fn repo_view<'a>(&'a self, repo: &'a Repo, selected: Option<&Path>) -> Element<'a, Message> {
         let c = &self.colors;
         let path = repo.path().to_path_buf();
-        let open = self.is_open(&Section::Repo(repo.name().to_string()));
+        let shown = self.fold(&Section::Repo(repo.name().to_string()));
         let menu_open =
             matches!(&self.menu, Some(OpenMenu::Repo(open)) if open.as_path() == repo.path());
         let hovered = self.hovered_repo.as_deref() == Some(repo.path());
@@ -175,7 +178,7 @@ impl App {
         // at the end (a row lays out `Fill` children last, with whatever width is left).
         let header = button(
             row![
-                chevron(c, open),
+                chevron(c, shown),
                 badge(c, repo.name(), self.repo_color(repo.path())),
                 ellipsized_text(repo.name())
                     .font(fonts::UI_SEMIBOLD)
@@ -215,16 +218,18 @@ impl App {
         let menu = menu_open.then(|| self.repo_menu(repo));
         let header = popup(header, menu, Message::MenuDismissed);
 
-        let mut view = column![header].spacing(2);
-        if open {
-            view = view.push(
-                column(
-                    repo.worktrees()
-                        .iter()
-                        .map(|wt| worktree_view(c, wt, selected)),
-                )
-                .spacing(2),
-            );
+        // The worktrees are built while any of them shows, folding included. The gap
+        // above them is inside the fold, so a folded repo is just its header.
+        let mut view = column![header];
+        if shown > 0.0 {
+            let worktrees = column(
+                repo.worktrees()
+                    .iter()
+                    .map(|wt| worktree_view(c, wt, selected)),
+            )
+            .spacing(2)
+            .padding(Padding::ZERO.top(2.0));
+            view = view.push(reveal(worktrees, shown, c.panel));
         }
         view.into()
     }

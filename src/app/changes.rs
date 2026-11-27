@@ -18,6 +18,7 @@ use iced::widget::text::{LineHeight, Shaping};
 use iced::{Font, Radians, Rotation, Size, alignment};
 
 use super::file_icon::file_icon;
+use super::reveal::reveal;
 use super::sidebar::{badge, chip};
 use super::{App, DiscardScope, Message, RemoteOp, Removal, Section, empty_state};
 use crate::git::{ChangeKind, DiffSource, FileEntry, Status};
@@ -204,13 +205,14 @@ impl App {
                 return None;
             }
 
-            let open = self.is_open(&section);
-            let mut group = column![section_header(c, title, files.len(), section, open)];
-            if open {
+            let shown = self.fold(&section);
+            let mut group = column![section_header(c, title, files.len(), section, shown)];
+            // Built while any of it shows, folding included.
+            if shown > 0.0 {
                 let rows = files
                     .into_iter()
                     .map(|(file, kind)| self.file_row(file, kind, staged));
-                group = group.push(column(rows).spacing(1));
+                group = group.push(reveal(column(rows).spacing(1), shown, c.panel));
             }
             Some(group.into())
         };
@@ -427,7 +429,7 @@ fn section_header<'a>(
     title: &str,
     count: usize,
     section: Section,
-    open: bool,
+    shown: f32,
 ) -> Element<'a, Message> {
     let (actions, chip_color, chip_background) = if section == Section::Staged {
         (
@@ -453,7 +455,7 @@ fn section_header<'a>(
 
     let title = button(
         row![
-            chevron(c, open),
+            chevron(c, shown),
             theme::label(c, title),
             chip(count, chip_color, chip_background),
         ]

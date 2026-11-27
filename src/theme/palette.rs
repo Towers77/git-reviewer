@@ -22,6 +22,7 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 
 impl Rgb {
     const BLACK: Rgb = Rgb(0, 0, 0);
+    const WHITE: Rgb = Rgb(255, 255, 255);
 
     /// This color moved `amount` (0 to 1) of the way toward `other`, channel by channel,
     /// rounded to whole channel values like a hex code.
@@ -317,6 +318,8 @@ pub const PRESETS: [Preset; 5] = [
 const LIGHT_BACKGROUND: f32 = 0.4;
 /// Above this luminance the accent is light enough to carry dark text; below it, white.
 const LIGHT_ACCENT: f32 = 0.35;
+/// How far the commit button's accent moves toward white under the mouse.
+const ACCENT_HOVER: f32 = 0.15;
 /// How strong a chip's background is: its text color, see-through.
 const CHIP_ALPHA: f32 = 0.16;
 /// The same for a repo's badge, a step stronger so its initials read as one block.
@@ -358,6 +361,8 @@ pub struct Colors {
     // The accent.
     /// Worktree icons, the commit box's focus border and the commit button.
     pub accent: Color,
+    /// The commit button under the mouse: the accent a step lighter, on any theme.
+    pub accent_hover: Color,
     /// Text and icons on the accent: dark on a light accent, white on a dark one.
     pub on_accent: Color,
     /// The selected worktree and file rows: the accent over the panel. Opaque, since a
@@ -371,6 +376,8 @@ pub struct Colors {
     pub danger_border: Color,
     pub modified: Color,
     pub added: Color,
+    /// A confirmation toast's border, like `danger_border` for an error's.
+    pub added_border: Color,
     pub renamed: Color,
     pub deleted: Color,
     /// Behind count chips and the diff's Staged/Unstaged tag: the status color, faint,
@@ -431,6 +438,7 @@ impl Colors {
             text_muted: step(0.777),
             text: text.color(),
             accent: accent.color(),
+            accent_hover: accent.mix(Rgb::WHITE, ACCENT_HOVER).color(),
             on_accent,
             selected: panel.mix(accent, 0.16).color(),
             selected_hover: panel.mix(accent, 0.3).color(),
@@ -438,6 +446,7 @@ impl Colors {
             danger_border: red.alpha(0.35),
             modified: yellow.color(),
             added: green.color(),
+            added_border: green.alpha(0.35),
             renamed: named(Accent::Blue).color(),
             deleted: red.color(),
             modified_chip: yellow.alpha(CHIP_ALPHA),
@@ -468,6 +477,7 @@ impl Colors {
             text_muted: f(self.text_muted),
             text: f(self.text),
             accent: f(self.accent),
+            accent_hover: f(self.accent_hover),
             on_accent: f(self.on_accent),
             selected: f(self.selected),
             selected_hover: f(self.selected_hover),
@@ -475,6 +485,7 @@ impl Colors {
             danger_border: f(self.danger_border),
             modified: f(self.modified),
             added: f(self.added),
+            added_border: f(self.added_border),
             renamed: f(self.renamed),
             deleted: f(self.deleted),
             modified_chip: f(self.modified_chip),

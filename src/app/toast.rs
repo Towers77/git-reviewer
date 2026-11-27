@@ -1,61 +1,217 @@
-//! The error toasts in the bottom-right corner, like VS Code's notifications: each
-//! stays until its × is clicked, newer ones stack below the older ones, and they rise
-//! and fade in, then sink and fade out while the stack closes the gap.
+//! The toasts in the bottom-right corner, like VS Code's notifications. An error stays
+//! until its × is clicked; a confirmation (a push or a fetch went through) closes
+//! itself after `CONFIRMATION_TIME`, with a bar along its bottom counting down. The
+//! countdown waits while the mouse is on the toast or the window isn't focused, so a
+//! confirmation can't close unseen. Newer toasts stack below the older ones, and they
+//! rise and fade in, then sink and fade out while the stack closes the gap.
 
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use iced::widget::scrollable::Direction;
-use iced::widget::{container, keyed_column, opaque, row, scrollable, text};
-use iced::{Animation, Element, Fill, Padding, Vector};
+use iced::widget::{
+    Space, container, keyed_column, mouse_area, opaque, row, scrollable, stack, text,
+};
+use iced::{Animation, Color, Element, Event, Fill, Padding, Subscription, Vector, event, window};
 
 use super::slide::slide;
 use super::{Message, changes};
 use crate::theme::icons::{self, icon};
-use crate::theme::{self, Colors, icon_sizes, layouts, motion, text_sizes};
+use crate::theme::{self, Colors, icon_sizes, layouts, motion, radii, text_sizes};
 
-/// At most this many toasts are shown: a newer one past it sends the oldest away, so a
-/// burst of errors can't fill the window.
+/// At most this many toasts are shown: a newer one past it sends an older one away, so
+/// a burst of them can't fill the window.
 const MOST_SHOWN: usize = 3;
 /// How far a toast rises as it comes in, and sinks as it leaves: back the way it came.
 const SHIFT: f32 = 12.0;
+/// How long a confirmation stays before closing itself.
+const CONFIRMATION_TIME: Duration = Duration::from_secs(4);
+/// The countdown bar's height.
+const BAR_HEIGHT: f32 = 2.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// Something failed: stays until closed.
+    Error,
+    /// Something went through: closes itself.
+    Done,
+}
+
+/// What a toast is about, so that an action going through can close the error it
+/// left open last time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Topic {
+    /// A worktree's Sync or Publish, by its folder: both push its branch, so one
+    /// working makes the other's error outdated too.
+    Remote(PathBuf),
+    FetchAll,
+}
+
+/// An action's confirmation, worked out before it runs: what it'll say, and what
+/// it's about.
+#[derive(Debug, Clone)]
+pub struct Confirmation {
+    pub message: String,
+    pub about: Topic,
+}
 
 #[derive(Default)]
 pub(super) struct Toasts {
     /// Oldest first. A closed toast stays here until it's done leaving.
     list: Vec<Toast>,
     next_id: u64,
+    /// The toast under the mouse, if any.
+    hovered: Option<u64>,
+    /// The window isn't focused. Starts `false`: a window opens focused.
+    unfocused: bool,
 }
 
 struct Toast {
     /// What the stack is keyed by, so a toast leaving from the middle doesn't hand its
     /// place's widget state (the message's scroll, the ×'s hover) to the one after it.
     id: u64,
+    kind: Kind,
     message: String,
+    about: Option<Topic>,
     /// `true` while it's shown: it animates to `false` when it's closed.
     shown: Animation<bool>,
+    /// A confirmation's countdown; errors have none.
+    clock: Option<Clock>,
+}
+
+/// A countdown that can wait and then go on from where it was.
+#[derive(Debug, Clone, Copy)]
+struct Clock {
+    /// What was left when it last started (or stopped) counting.
+    left: Duration,
+    /// When it last started counting: `None` while it waits.
+    since: Option<Instant>,
+}
+
+impl Clock {
+    fn new(now: Instant) -> Clock {
+        Clock {
+            left: CONFIRMATION_TIME,
+            since: Some(now),
+        }
+    }
+
+    fn left(&self, now: Instant) -> Duration {
+        match self.since {
+            Some(since) => self
+                .left
+                .saturating_sub(now.saturating_duration_since(since)),
+            None => self.left,
+        }
+    }
+
+    /// Counts down from `now` on, or waits, keeping what's left.
+    fn set_running(&mut self, running: bool, now: Instant) {
+        match (running, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(_)) => {
+                self.left = self.left(now);
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Toast {
+    /// How much of a confirmation's time is left at `now`, from 1 (all of it) to 0.
+    fn time_left(&self, now: Instant) -> Option<f32> {
+        let left = self.clock?.left(now);
+        Some(left.as_secs_f32() / CONFIRMATION_TIME.as_secs_f32())
+    }
 }
 
 impl Toasts {
-    /// Shows `message` in a new toast, unless an open one already says the same thing.
-    pub(super) fn push(&mut self, message: String, now: Instant) {
-        if self.open().any(|toast| toast.message == message) {
-            return;
+    /// Shows `message` in a new toast of `kind`, unless an open one already says the
+    /// same thing: an open confirmation then starts its time over instead. A
+    /// confirmation closes the open errors `about` the same thing, which it makes
+    /// outdated.
+    pub(super) fn push(&mut self, kind: Kind, message: String, about: Option<Topic>, now: Instant) {
+        let clock = (kind == Kind::Done).then(|| Clock::new(now));
+        if kind == Kind::Done && about.is_some() {
+            let outdated: Vec<u64> = self
+                .open()
+                .filter(|toast| toast.kind == Kind::Error && toast.about == about)
+                .map(|toast| toast.id)
+                .collect();
+            for id in outdated {
+                self.dismiss(id, now);
+            }
         }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.list.push(Toast {
-            id,
-            message,
-            shown: Animation::new(false)
-                .duration(motion::DURATION)
-                .easing(motion::EASING)
-                .go(true, now),
-        });
 
+        if let Some(open) = self
+            .list
+            .iter_mut()
+            .find(|toast| toast.shown.value() && toast.kind == kind && toast.message == message)
+        {
+            open.clock = clock;
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.list.push(Toast {
+                id,
+                kind,
+                message,
+                about,
+                shown: Animation::new(false)
+                    .duration(motion::DURATION)
+                    .easing(motion::EASING)
+                    .go(true, now),
+                clock,
+            });
+            self.make_room(id, now);
+        }
+        // A new countdown waits too while the window isn't focused.
+        self.run_clocks(now);
+    }
+
+    /// Past the most shown, older toasts than `newest` leave, confirmations first: an
+    /// error shouldn't go unread because a few pushes went through.
+    fn make_room(&mut self, newest: u64, now: Instant) {
         let extra = self.open().count().saturating_sub(MOST_SHOWN);
-        let oldest: Vec<u64> = self.open().take(extra).map(|toast| toast.id).collect();
-        for id in oldest {
+        let older = || self.open().filter(|toast| toast.id != newest);
+        let leaving: Vec<u64> = older()
+            .filter(|toast| toast.kind == Kind::Done)
+            .chain(older().filter(|toast| toast.kind == Kind::Error))
+            .take(extra)
+            .map(|toast| toast.id)
+            .collect();
+        for id in leaving {
             self.dismiss(id, now);
+        }
+    }
+
+    /// The mouse went onto (`hovered`) or off toast `id`.
+    pub(super) fn hover(&mut self, id: u64, hovered: bool, now: Instant) {
+        if hovered {
+            self.hovered = Some(id);
+        } else if self.hovered == Some(id) {
+            // Only the toast being left: moving between toasts, the next one's enter
+            // may come before this exit.
+            self.hovered = None;
+        }
+        self.run_clocks(now);
+    }
+
+    /// The window gained or lost focus.
+    pub(super) fn set_focused(&mut self, focused: bool, now: Instant) {
+        self.unfocused = !focused;
+        self.run_clocks(now);
+    }
+
+    /// Starts or stops each countdown: it runs unless its toast is under the mouse or
+    /// the window isn't focused.
+    fn run_clocks(&mut self, now: Instant) {
+        let (hovered, unfocused) = (self.hovered, self.unfocused);
+        for toast in &mut self.list {
+            if let Some(clock) = &mut toast.clock {
+                clock.set_running(!unfocused && hovered != Some(toast.id), now);
+            }
         }
     }
 
@@ -66,15 +222,27 @@ impl Toasts {
         }
     }
 
+    /// Closes the confirmations whose time is up.
+    pub(super) fn expire(&mut self, now: Instant) {
+        for toast in &mut self.list {
+            if toast.shown.value() && toast.time_left(now) == Some(0.0) {
+                toast.shown.go_mut(false, now);
+            }
+        }
+    }
+
     /// Lets go of the toasts that are done leaving.
     pub(super) fn prune(&mut self, now: Instant) {
         self.list
             .retain(|toast| toast.shown.value() || toast.shown.is_animating(now));
     }
 
-    /// A toast is coming or going: the app asks for frames until it's done.
-    pub(super) fn is_animating(&self, now: Instant) -> bool {
-        self.list.iter().any(|toast| toast.shown.is_animating(now))
+    /// The stack changes on its own: a toast is coming or going, or a confirmation is
+    /// counting down (not while it waits). The app asks for frames until it's done.
+    pub(super) fn is_moving(&self, now: Instant) -> bool {
+        self.list.iter().any(|toast| {
+            toast.shown.is_animating(now) || toast.clock.is_some_and(|clock| clock.since.is_some())
+        })
     }
 
     fn open(&self) -> impl Iterator<Item = &Toast> {
@@ -93,9 +261,13 @@ impl Toasts {
             let opacity = shown.clamp(0.0, 1.0);
             // Below its place by `SHIFT` when gone: it rises from there and sinks back.
             let offset = Vector::new(0.0, SHIFT * (1.0 - shown));
+            // The mouse on a card holds its countdown. While the card moves, `slide`
+            // hides the cursor, so it only counts as hovered once it's settled.
+            let card = mouse_area(card(&c.faded(opacity), opacity, toast, now))
+                .on_enter(Message::ToastHovered(toast.id, true))
+                .on_exit(Message::ToastHovered(toast.id, false));
             // The gap above each card is part of its place, so it closes with it.
-            let place = container(card(&c.faded(opacity), opacity, toast))
-                .padding(Padding::ZERO.top(layouts::GAP));
+            let place = container(card).padding(Padding::ZERO.top(layouts::GAP));
             // `opaque`: in a stack, the mouse passes through to the layer below wherever
             // the top layer has nothing interactive, so a click on a message's text would
             // land on the row under it. It wraps the place rather than the card, so it
@@ -114,9 +286,22 @@ impl Toasts {
     }
 }
 
-/// One toast's card, in colors faded to `opacity` (see `Colors::faded`). A long
-/// message, like a hook's output, scrolls inside it.
-fn card<'a>(c: &Colors, opacity: f32, toast: &'a Toast) -> Element<'a, Message> {
+/// The window gaining and losing focus, which holds the confirmations' countdowns.
+pub(super) fn window_focus() -> Subscription<Message> {
+    event::listen_with(|event, _status, _window| match event {
+        Event::Window(window::Event::Focused) => Some(Message::WindowFocused(true)),
+        Event::Window(window::Event::Unfocused) => Some(Message::WindowFocused(false)),
+        _ => None,
+    })
+}
+
+/// One toast's card at `now`, in colors faded to `opacity` (see `Colors::faded`). A
+/// long message, like a hook's output, scrolls inside it.
+fn card<'a>(c: &Colors, opacity: f32, toast: &'a Toast, now: Instant) -> Element<'a, Message> {
+    let (icon_bytes, color, border) = match toast.kind {
+        Kind::Error => (icons::CIRCLE_ALERT, c.danger, c.danger_border),
+        Kind::Done => (icons::CIRCLE_CHECK, c.added, c.added_border),
+    };
     let message = scrollable(
         container(text(&toast.message).size(text_sizes::SMALL).width(Fill))
             // Room for the scrollbar, which is drawn over the content.
@@ -126,20 +311,47 @@ fn card<'a>(c: &Colors, opacity: f32, toast: &'a Toast) -> Element<'a, Message> 
     .style(theme::scrollbar(c))
     .width(Fill);
 
-    container(
+    let body = container(
         row![
             // 2px down: centers the icon on the message's first line.
-            container(icon(icons::CIRCLE_ALERT, icon_sizes::BUTTON, c.danger))
-                .padding(Padding::ZERO.top(2.0)),
+            container(icon(icon_bytes, icon_sizes::BUTTON, color)).padding(Padding::ZERO.top(2.0)),
             message,
             changes::icon_button(c, icons::X, Message::DismissToast(toast.id), false),
         ]
         .spacing(layouts::GAP),
     )
-    .padding([10.0, 12.0])
-    .width(layouts::TOAST_WIDTH)
-    .max_height(layouts::TOAST_MAX_HEIGHT)
-    .style(theme::toast(c, opacity))
+    .padding([10.0, 12.0]);
+
+    // The bar is a layer over the body rather than a row under it, so a long message,
+    // which fills the card's height, can't squeeze it out.
+    let content: Element<'a, Message> = match toast.time_left(now) {
+        Some(left) => stack![body, countdown(color, left)].into(),
+        None => body.into(),
+    };
+
+    container(content)
+        .width(layouts::TOAST_WIDTH)
+        .max_height(layouts::TOAST_MAX_HEIGHT)
+        .style(theme::toast(c, border, opacity))
+        .into()
+}
+
+/// The bar along a confirmation's bottom edge, `left` (1 to 0) of its full length, which
+/// shrinks toward its left end.
+///
+/// It runs between the card's rounded corners, not into them: iced can't clip to a
+/// rounded border, and caps a quad's corner radius at half its height, so a 2px bar
+/// would poke out of the corners' curve.
+fn countdown<'a>(color: Color, left: f32) -> Element<'a, Message> {
+    let full = layouts::TOAST_WIDTH - 2.0 * radii::CONTROL;
+    container(
+        container(Space::new().width(full * left).height(BAR_HEIGHT))
+            .style(theme::background(color)),
+    )
+    // 1px up: inside the card's border, not over it.
+    .padding(Padding::ZERO.left(radii::CONTROL).bottom(1.0))
+    .align_bottom(Fill)
+    .width(Fill)
     .into()
 }
 
@@ -151,12 +363,21 @@ mod tests {
         toasts.open().map(|toast| toast.message.as_str()).collect()
     }
 
+    /// Toasts about nothing in particular.
+    fn push(toasts: &mut Toasts, kind: Kind, message: &str, now: Instant) {
+        toasts.push(kind, message.into(), None, now);
+    }
+
+    fn remote(worktree: &str) -> Option<Topic> {
+        Some(Topic::Remote(PathBuf::from(worktree)))
+    }
+
     #[test]
     fn the_same_message_twice_is_one_toast() {
         let now = Instant::now();
         let mut toasts = Toasts::default();
-        toasts.push("push failed".into(), now);
-        toasts.push("push failed".into(), now);
+        push(&mut toasts, Kind::Error, "push failed", now);
+        push(&mut toasts, Kind::Error, "push failed", now);
         assert_eq!(messages(&toasts), ["push failed"]);
     }
 
@@ -164,9 +385,9 @@ mod tests {
     fn a_closed_message_can_come_back() {
         let now = Instant::now();
         let mut toasts = Toasts::default();
-        toasts.push("push failed".into(), now);
+        push(&mut toasts, Kind::Error, "push failed", now);
         toasts.dismiss(0, now);
-        toasts.push("push failed".into(), now);
+        push(&mut toasts, Kind::Error, "push failed", now);
         assert_eq!(messages(&toasts), ["push failed"]);
         assert_eq!(toasts.list.len(), 2, "the closed one is still leaving");
     }
@@ -176,23 +397,149 @@ mod tests {
         let now = Instant::now();
         let mut toasts = Toasts::default();
         for message in ["a", "b", "c", "d"] {
-            toasts.push(message.into(), now);
+            push(&mut toasts, Kind::Error, message, now);
         }
         assert_eq!(messages(&toasts), ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn past_the_most_shown_confirmations_leave_before_errors() {
+        let now = Instant::now();
+        let mut toasts = Toasts::default();
+        push(&mut toasts, Kind::Error, "error 1", now);
+        push(&mut toasts, Kind::Done, "pushed", now);
+        push(&mut toasts, Kind::Error, "error 2", now);
+        push(&mut toasts, Kind::Error, "error 3", now);
+        assert_eq!(messages(&toasts), ["error 1", "error 2", "error 3"]);
+        // The newest always shows, even if it's a confirmation.
+        push(&mut toasts, Kind::Done, "fetched", now);
+        assert_eq!(messages(&toasts), ["error 2", "error 3", "fetched"]);
+    }
+
+    #[test]
+    fn a_confirmation_closes_itself_and_an_error_does_not() {
+        let now = Instant::now();
+        let mut toasts = Toasts::default();
+        push(&mut toasts, Kind::Error, "push failed", now);
+        push(&mut toasts, Kind::Done, "fetched", now);
+
+        toasts.expire(now + CONFIRMATION_TIME / 2);
+        assert_eq!(messages(&toasts), ["push failed", "fetched"]);
+        toasts.expire(now + CONFIRMATION_TIME);
+        assert_eq!(messages(&toasts), ["push failed"]);
+    }
+
+    #[test]
+    fn the_same_confirmation_again_starts_its_time_over() {
+        let now = Instant::now();
+        let mut toasts = Toasts::default();
+        push(&mut toasts, Kind::Done, "fetched", now);
+        push(
+            &mut toasts,
+            Kind::Done,
+            "fetched",
+            now + CONFIRMATION_TIME / 2,
+        );
+
+        toasts.expire(now + CONFIRMATION_TIME);
+        assert_eq!(messages(&toasts), ["fetched"], "still has half its time");
+        toasts.expire(now + CONFIRMATION_TIME * 3 / 2);
+        assert!(messages(&toasts).is_empty());
+    }
+
+    #[test]
+    fn the_bar_shrinks_from_full_to_nothing() {
+        let now = Instant::now();
+        let mut toasts = Toasts::default();
+        push(&mut toasts, Kind::Done, "fetched", now);
+        let toast = &toasts.list[0];
+        assert_eq!(toast.time_left(now), Some(1.0));
+        assert_eq!(toast.time_left(now + CONFIRMATION_TIME / 4), Some(0.75));
+        assert_eq!(toast.time_left(now + CONFIRMATION_TIME * 2), Some(0.0));
+    }
+
+    #[test]
+    fn the_countdown_waits_under_the_mouse_and_goes_on_from_there() {
+        let now = Instant::now();
+        let quarter = CONFIRMATION_TIME / 4;
+        let mut toasts = Toasts::default();
+        push(&mut toasts, Kind::Done, "fetched", now);
+
+        toasts.hover(0, true, now + quarter);
+        assert!(!toasts.is_moving(now + quarter), "no frames while it waits");
+        toasts.expire(now + CONFIRMATION_TIME * 10);
+        assert_eq!(messages(&toasts), ["fetched"]);
+        assert_eq!(
+            toasts.list[0].time_left(now + CONFIRMATION_TIME * 10),
+            Some(0.75)
+        );
+
+        // Off it again, the three quarters left run from there.
+        let off = now + CONFIRMATION_TIME * 10;
+        toasts.hover(0, false, off);
+        toasts.expire(off + quarter * 2);
+        assert_eq!(messages(&toasts), ["fetched"]);
+        toasts.expire(off + quarter * 3);
+        assert!(messages(&toasts).is_empty());
+    }
+
+    #[test]
+    fn the_countdown_waits_while_the_window_is_not_focused() {
+        let now = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.set_focused(false, now);
+        // Even one that arrives meanwhile.
+        push(&mut toasts, Kind::Done, "fetched", now);
+        toasts.expire(now + CONFIRMATION_TIME * 2);
+        assert_eq!(messages(&toasts), ["fetched"]);
+
+        let back = now + CONFIRMATION_TIME * 2;
+        toasts.set_focused(true, back);
+        toasts.expire(back + CONFIRMATION_TIME);
+        assert!(messages(&toasts).is_empty());
+    }
+
+    #[test]
+    fn leaving_another_toast_keeps_the_hovered_one_waiting() {
+        let now = Instant::now();
+        let mut toasts = Toasts::default();
+        push(&mut toasts, Kind::Done, "fetched", now);
+        push(&mut toasts, Kind::Done, "pushed", now);
+        // Moving from the first onto the second: the enter can come first.
+        toasts.hover(1, true, now);
+        toasts.hover(0, false, now);
+        toasts.expire(now + CONFIRMATION_TIME);
+        assert_eq!(messages(&toasts), ["pushed"]);
+    }
+
+    #[test]
+    fn a_confirmation_closes_the_errors_it_makes_outdated() {
+        let now = Instant::now();
+        let mut toasts = Toasts::default();
+        toasts.push(Kind::Error, "sync failed".into(), remote("a"), now);
+        toasts.push(Kind::Error, "publish failed".into(), remote("b"), now);
+        push(&mut toasts, Kind::Error, "couldn't save", now);
+
+        toasts.push(Kind::Done, "synced a".into(), remote("a"), now);
+        assert_eq!(
+            messages(&toasts),
+            ["publish failed", "couldn't save", "synced a"],
+            "only the error about the same worktree's push closes"
+        );
     }
 
     #[test]
     fn a_toast_is_let_go_once_it_is_done_leaving() {
         let now = Instant::now();
         let mut toasts = Toasts::default();
-        toasts.push("a".into(), now);
-        toasts.push("b".into(), now);
+        push(&mut toasts, Kind::Error, "a", now);
+        push(&mut toasts, Kind::Error, "b", now);
         toasts.dismiss(0, now);
 
         toasts.prune(now + motion::DURATION / 2);
         assert_eq!(toasts.list.len(), 2, "still leaving");
         toasts.prune(now + motion::DURATION * 2);
         assert_eq!(toasts.list.iter().map(|t| t.id).collect::<Vec<_>>(), [1]);
-        assert!(!toasts.is_animating(now + motion::DURATION * 2));
+        assert!(!toasts.is_moving(now + motion::DURATION * 2));
     }
 }

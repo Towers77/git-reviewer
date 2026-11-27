@@ -254,6 +254,7 @@ pub mod icons {
     pub const PLUS: &[u8] = include_bytes!("../assets/icons/plus.svg");
     pub const ROTATE_CW: &[u8] = include_bytes!("../assets/icons/rotate-cw.svg");
     pub const CIRCLE_ALERT: &[u8] = include_bytes!("../assets/icons/circle-alert.svg");
+    pub const CIRCLE_CHECK: &[u8] = include_bytes!("../assets/icons/circle-check.svg");
     pub const X: &[u8] = include_bytes!("../assets/icons/x.svg");
     pub const SPINNER: &[u8] = include_bytes!("../assets/icons/spinner.svg");
     pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
@@ -348,7 +349,8 @@ pub fn danger_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::S
 }
 
 pub fn primary_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
-    let (accent, on_accent, pill, text_dim) = (c.accent, c.on_accent, c.pill, c.text_dim);
+    let (accent, accent_hover, on_accent, pill, text_dim) =
+        (c.accent, c.accent_hover, c.on_accent, c.pill, c.text_dim);
     move |_, status| {
         let base = button::Style {
             background: Some(accent.into()),
@@ -362,6 +364,8 @@ pub fn primary_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::
         };
 
         match status {
+            button::Status::Active => base,
+            button::Status::Hovered | button::Status::Pressed => base.with_background(accent_hover),
             // Not `dimmed`: half-faded text on a half-faded accent is unreadable. A
             // neutral grey button reads as "off" and stays legible.
             button::Status::Disabled => button::Style {
@@ -369,7 +373,6 @@ pub fn primary_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::
                 text_color: text_dim,
                 ..base
             },
-            _ => base,
         }
     }
 }
@@ -747,11 +750,16 @@ pub fn filled_tag(text: Color, background: Color) -> impl Fn(&Theme) -> containe
     }
 }
 
-/// The error toast's card: a step lighter than the panels under it, with a red border
-/// and a shadow to lift it off them. `c` is already faded to `opacity` (see
-/// `Colors::faded`); the shadow, which isn't a theme color, fades by it here.
-pub fn toast(c: &Colors, opacity: f32) -> impl Fn(&Theme) -> container::Style + use<> {
-    let (background, border, text) = (c.hover, c.danger_border, c.text);
+/// A toast's card: a step lighter than the panels under it, with a `border` in its
+/// kind's color (red for an error, green for a confirmation) and a shadow to lift it
+/// off them. `c` and `border` are already faded to `opacity` (see `Colors::faded`);
+/// the shadow, which isn't a theme color, fades by it here.
+pub fn toast(
+    c: &Colors,
+    border: Color,
+    opacity: f32,
+) -> impl Fn(&Theme) -> container::Style + use<> {
+    let (background, text) = (c.hover, c.text);
     move |_| container::Style {
         // Set here so the message fades with the card, rather than taking the theme's.
         text_color: Some(text),

@@ -8,10 +8,12 @@ use std::time::Duration;
 
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::text::{self as core_text, Paragraph as _};
+use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::scrollable::Direction;
 use iced::widget::text::{IntoFragment, LineHeight, Shaping, Span, Wrapping};
 use iced::widget::{
-    Text, column, container, responsive, rich_text, row, rule, scrollable, space, span, stack, text,
+    Id, Text, column, container, responsive, rich_text, row, rule, scrollable, sensor, space, span,
+    stack, text,
 };
 use iced::{
     Alignment::Center,
@@ -20,6 +22,7 @@ use iced::{
 };
 use iced_palace::widget::ellipsized_text;
 
+use super::changes::sized_icon_button;
 use super::sticky::sticky;
 use super::{App, Message, empty_state, on_thread};
 use crate::git::{Diff, DiffLine, DiffSource};
@@ -36,9 +39,25 @@ const GUTTER_WIDTH: f32 = layouts::LINE_NUMBER_WIDTH * 2.0
     + NEW_NUMBER_PADDING
     + layouts::DIFF_SIGN_WIDTH;
 const CODE_PADDING_RIGHT: f32 = 24.0;
+/// Room under the last line, so it doesn't sit on the panel's edge.
+const CODE_PADDING_BOTTOM: f32 = 8.0;
 
 /// How many diff lines go in one `Chunk`.
 const CHUNK_LINES: usize = 64;
+
+/// How many lines show above a change the header's arrows jump to (see
+/// `DiffView::change_target`): a hunk's usual context.
+const CHANGE_CONTEXT: usize = 3;
+
+/// The diff's scrollable, for the arrows' `scroll_to` (see `App::jump_to_change`).
+const SCROLLABLE: Id = Id::new("diff");
+
+/// Which way the header's arrows jump between changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChangeStep {
+    Previous,
+    Next,
+}
 
 /// The selected file's diff, laid out the way `diff_body` draws it. `load_diff` builds
 /// it once per diff, so `view`, which runs after every message, does no per-line work.
@@ -64,6 +83,10 @@ pub(super) struct DiffView {
     removed: usize,
     chunks: Vec<Chunk>,
     runs: Vec<Run>,
+    /// The first line of each change, in order. A change is a run of added and removed
+    /// lines with no unchanged line in it, so an edited line (removed, then added) is
+    /// one change, as in VS Code. Hunks wouldn't do: the whole file is one.
+    changes: Vec<usize>,
     /// How wide the rows must be to fit the longest line, gutter and padding included.
     width: f32,
     /// A binary file: a message is shown instead of lines (it has none).
@@ -227,6 +250,7 @@ impl DiffView {
             added,
             removed,
             chunks: chunks(&diff, None),
+            changes: change_starts(&runs),
             runs,
             width: content_width(&diff),
             binary: diff.binary,
@@ -263,6 +287,36 @@ impl DiffView {
     /// Whether it's a binary file, which has no lines to show.
     pub(super) fn is_binary(&self) -> bool {
         self.binary
+    }
+
+    /// How far down the diff scrolls in a viewport `viewport_height` tall: as far as
+    /// iced lets it, its whole height (the lines and the room under them) less the
+    /// viewport's, or 0 if it fits.
+    fn max_scroll_y(&self, viewport_height: f32) -> f32 {
+        let height = lines_height(self.diff.lines.len()) + CODE_PADDING_BOTTOM;
+        (height - viewport_height).max(0.0)
+    }
+
+    /// Where to scroll to for the previous or next change from `scroll_y`, in a viewport
+    /// `viewport_height` tall: with the change `CHANGE_CONTEXT` lines from the top, or
+    /// scrolled to the bottom for one too near the end for that. `None` when there's no
+    /// change that way, or the bottom is reached already (every change left is then on
+    /// screen): its arrow is disabled.
+    fn change_target(&self, step: ChangeStep, scroll_y: f32, viewport_height: f32) -> Option<f32> {
+        // Offsets this close count as the same: the change just jumped to (fractional
+        // scroll offsets) isn't the next one again.
+        const SLACK: f32 = 0.5;
+        let max = self.max_scroll_y(viewport_height);
+        // A stale offset (the file got shorter) is wherever iced clamped it to.
+        let scroll_y = scroll_y.min(max);
+        let mut targets = self
+            .changes
+            .iter()
+            .map(|&line| lines_height(line.saturating_sub(CHANGE_CONTEXT)).min(max));
+        match step {
+            ChangeStep::Previous => targets.rev().find(|&y| y < scroll_y - SLACK),
+            ChangeStep::Next => targets.find(|&y| y > scroll_y + SLACK),
+        }
     }
 
     /// Keeps this on screen until `next`, a newer version of the same diff, is
@@ -339,6 +393,22 @@ fn chunks(diff: &Diff, colors: Option<&[LineColors]>) -> Vec<Chunk> {
         .collect()
 }
 
+/// Where each change starts (see `DiffView::changes`): the first line of every run of
+/// added or removed lines that comes after unchanged ones, or first.
+fn change_starts(runs: &[Run]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let (mut line, mut in_change) = (0, false);
+    for run in runs {
+        let changed = run.kind != Kind::Context;
+        if changed && !in_change {
+            starts.push(line);
+        }
+        in_change = changed;
+        line += run.lines;
+    }
+    starts
+}
+
 impl App {
     /// A header bar (path, which side, +N −N) over the scrollable diff. While the diff
     /// loads (it's read, then highlighted), the header is there and the body waits.
@@ -359,6 +429,21 @@ impl App {
             };
         };
 
+        // Only for a diff that's on screen, with changes to jump between.
+        let nav = self
+            .shown_diff()
+            .filter(|diff| !diff.changes.is_empty())
+            .map(|diff| {
+                let can_jump = |step| {
+                    diff.change_target(step, self.diff_scroll_y, self.diff_viewport_height)
+                        .is_some()
+                };
+                ChangeNav {
+                    previous: can_jump(ChangeStep::Previous),
+                    next: can_jump(ChangeStep::Next),
+                }
+            });
+
         let (counts, body) = match (&self.diff, self.diff_loading_for()) {
             (Some(Err(err)), _) => {
                 return empty_state(err.to_string(), c.danger).center(Fill).into();
@@ -377,12 +462,49 @@ impl App {
         };
 
         column![
-            diff_header(c, path, *source, counts),
+            diff_header(c, path, *source, counts, nav),
             rule::horizontal(1).style(theme::divider(c)),
             body,
         ]
         .into()
     }
+
+    /// The selected file's diff while its lines are on screen: read, highlighted, and
+    /// not a binary file.
+    fn shown_diff(&self) -> Option<&DiffView> {
+        match &self.diff {
+            Some(Ok(diff)) if !diff.is_loading() && !diff.is_binary() => Some(diff),
+            _ => None,
+        }
+    }
+
+    /// Scrolls the diff to the previous or next change (see `DiffView::change_target`),
+    /// if there's one that way.
+    pub(super) fn jump_to_change(&mut self, step: ChangeStep) -> Task<Message> {
+        let Some(y) = self.shown_diff().and_then(|diff| {
+            diff.change_target(step, self.diff_scroll_y, self.diff_viewport_height)
+        }) else {
+            return Task::none();
+        };
+        // Set here rather than left to `Message::DiffScrolled`: the scrollable only
+        // reports its new offset when it next draws, so the lines around the target
+        // wouldn't be built for that frame. iced builds the view after `update`, then
+        // runs the scroll on it, then draws (checked in iced_winit's event loop).
+        self.diff_scroll_y = y;
+        operation::scroll_to(
+            SCROLLABLE,
+            AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
+    }
+}
+
+/// Which of the header's previous / next change arrows can be clicked.
+struct ChangeNav {
+    previous: bool,
+    next: bool,
 }
 
 /// How wide the diff's rows must be to fit its longest line, gutter and padding
@@ -449,12 +571,14 @@ fn loading<'a>(c: &Colors, elapsed: Duration) -> Element<'a, Message> {
 }
 
 /// `counts` is (added, removed), or `None` while the diff is still being read, and for
-/// a binary file (see `DiffView::counts`).
+/// a binary file (see `DiffView::counts`). `nav` says which change arrows can be
+/// clicked, or is `None` to leave them out.
 fn diff_header<'a>(
     c: &Colors,
     path: &'a str,
     source: DiffSource,
     counts: Option<(usize, usize)>,
+    nav: Option<ChangeNav>,
 ) -> Element<'a, Message> {
     // Tinted like the list's section it comes from: green for staged, yellow for changes.
     let (side, color, background) = match source {
@@ -487,6 +611,26 @@ fn diff_header<'a>(
                     .size(text_sizes::SMALL)
                     .color(c.deleted),
             );
+    }
+    if let Some(nav) = nav {
+        // An arrow with nowhere to go has no `on_press`, so it's drawn disabled.
+        let arrow = |bytes, step, enabled: bool| {
+            sized_icon_button(
+                c,
+                bytes,
+                enabled.then_some(Message::JumpToChange(step)),
+                false,
+                layouts::ICON_BUTTON,
+                icon_sizes::ROW,
+            )
+        };
+        content = content.push(
+            row![
+                arrow(icons::ARROW_UP, ChangeStep::Previous, nav.previous),
+                arrow(icons::ARROW_DOWN, ChangeStep::Next, nav.next),
+            ]
+            .spacing(2),
+        );
     }
 
     container(content)
@@ -528,15 +672,23 @@ fn diff_body<'a>(c: &'a Colors, diff: &'a DiffView, scroll_y: f32) -> Element<'a
         // put when the code is scrolled sideways.
         let content = stack![row![space().width(GUTTER_WIDTH), code], sticky(gutter)];
 
-        scrollable(container(content).padding(Padding::ZERO.bottom(8.0)))
-            .direction(Direction::Both {
-                vertical: theme::thin_scrollbar(),
-                horizontal: theme::thin_scrollbar(),
-            })
-            .on_scroll(|viewport| Message::DiffScrolled(viewport.absolute_offset().y))
-            .style(theme::scrollbar(c))
-            .width(Fill)
-            .height(Fill)
+        let body =
+            scrollable(container(content).padding(Padding::ZERO.bottom(CODE_PADDING_BOTTOM)))
+                .id(SCROLLABLE)
+                .direction(Direction::Both {
+                    vertical: theme::thin_scrollbar(),
+                    horizontal: theme::thin_scrollbar(),
+                })
+                .on_scroll(|viewport| Message::DiffScrolled(viewport.absolute_offset().y))
+                .style(theme::scrollbar(c))
+                .width(Fill)
+                .height(Fill);
+
+        // Reports the viewport's height, which with the diff's own tells how far down
+        // it scrolls (see `DiffView::max_scroll_y`): when it's first drawn, and on every
+        // resize. `on_scroll` can't tell: iced never calls it for a diff that fits.
+        sensor(body)
+            .on_resize(|size| Message::DiffResized(size.height))
             .into()
     })
     .into()
@@ -815,6 +967,110 @@ mod tests {
         assert_eq!(chunk.minus_signs, "\n−\n−\n\n");
         let runs: Vec<_> = view.runs.iter().map(|run| run.lines).collect();
         assert_eq!(runs, vec![1, 2, 1, 1]);
+    }
+
+    /// A diff `len` lines long where the lines at `added` (indexes) are added, and the
+    /// rest unchanged.
+    fn diff_with_added(len: usize, added: &[usize]) -> Diff {
+        let lines = (0..len)
+            .map(|index| {
+                let text = index.to_string();
+                if added.contains(&index) {
+                    DiffLine::Added { new: index, text }
+                } else {
+                    DiffLine::Context {
+                        old: index,
+                        new: index,
+                        text,
+                    }
+                }
+            })
+            .collect();
+        Diff {
+            lines,
+            binary: false,
+        }
+    }
+
+    #[test]
+    fn test_a_change_is_a_run_of_changed_lines() {
+        // The edited lines 1–3 (removed, then added) are one change; 5 is another.
+        let diff = Diff {
+            lines: vec![
+                DiffLine::Context {
+                    old: 1,
+                    new: 1,
+                    text: String::new(),
+                },
+                DiffLine::Removed {
+                    old: 2,
+                    text: String::new(),
+                },
+                DiffLine::Removed {
+                    old: 3,
+                    text: String::new(),
+                },
+                DiffLine::Added {
+                    new: 2,
+                    text: String::new(),
+                },
+                DiffLine::Context {
+                    old: 4,
+                    new: 3,
+                    text: String::new(),
+                },
+                DiffLine::Added {
+                    new: 4,
+                    text: String::new(),
+                },
+            ],
+            binary: false,
+        };
+        let view = DiffView::new("x", DiffSource::Unstaged, diff);
+        assert_eq!(view.changes, vec![1, 5]);
+
+        // A new file is one change, from its first line; an unchanged one has none.
+        let new_file = DiffView::new("x", DiffSource::Untracked, diff_with_added(3, &[0, 1, 2]));
+        assert_eq!(new_file.changes, vec![0]);
+        let unchanged = DiffView::new("x", DiffSource::Unstaged, diff_with_added(3, &[]));
+        assert!(unchanged.changes.is_empty());
+    }
+
+    #[test]
+    fn test_change_targets_step_through_changes_and_stop_at_the_ends() {
+        use ChangeStep::{Next, Previous};
+        // 200 lines, changed at 2 (too near the top for 3 lines of context), 50, and
+        // 198 (too near the bottom to reach the top), in a viewport 10 lines tall.
+        let view = DiffView::new(
+            "x",
+            DiffSource::Unstaged,
+            diff_with_added(200, &[2, 50, 198]),
+        );
+        let viewport = lines_height(10);
+        let bottom = lines_height(200) + CODE_PADDING_BOTTOM - viewport;
+        let middle = lines_height(50 - CHANGE_CONTEXT);
+        let target = |step, scroll_y| view.change_target(step, scroll_y, viewport);
+
+        // At the top, the first change is on screen already.
+        assert_eq!(target(Next, 0.0), Some(middle));
+        assert_eq!(target(Previous, 0.0), None);
+        assert_eq!(target(Next, middle), Some(bottom));
+        // A fraction of a pixel off the change just jumped to still counts as on it.
+        assert_eq!(target(Next, middle + 0.3), Some(bottom));
+        assert_eq!(target(Previous, middle + 0.3), Some(0.0));
+        // At the bottom, nothing is further down.
+        assert_eq!(target(Next, bottom), None);
+        assert_eq!(target(Previous, bottom), Some(middle));
+        // Between changes: the ones on either side.
+        assert_eq!(target(Previous, middle + 100.0), Some(middle));
+        // A stale offset past the bottom counts as the bottom.
+        assert_eq!(target(Next, bottom * 2.0), None);
+        assert_eq!(target(Previous, bottom * 2.0), Some(middle));
+
+        // A diff that fits doesn't scroll, so there's nowhere to jump to.
+        let tall = lines_height(500);
+        assert_eq!(view.change_target(Next, 0.0, tall), None);
+        assert_eq!(view.change_target(Previous, 0.0, tall), None);
     }
 
     #[test]

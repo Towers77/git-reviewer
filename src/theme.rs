@@ -345,7 +345,8 @@ pub fn danger_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::S
 }
 
 pub fn primary_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::Style + use<> {
-    let (accent, on_accent, pill, text_dim) = (c.accent, c.on_accent, c.pill, c.text_dim);
+    let (accent, accent_hover, on_accent, pill, text_dim) =
+        (c.accent, c.accent_hover, c.on_accent, c.pill, c.text_dim);
     move |_, status| {
         let base = button::Style {
             background: Some(accent.into()),
@@ -359,6 +360,8 @@ pub fn primary_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::
         };
 
         match status {
+            button::Status::Active => base,
+            button::Status::Hovered | button::Status::Pressed => base.with_background(accent_hover),
             // Not `dimmed`: half-faded text on a half-faded accent is unreadable. A
             // neutral grey button reads as "off" and stays legible.
             button::Status::Disabled => button::Style {
@@ -366,7 +369,6 @@ pub fn primary_button(c: &Colors) -> impl Fn(&Theme, button::Status) -> button::
                 text_color: text_dim,
                 ..base
             },
-            _ => base,
         }
     }
 }

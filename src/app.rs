@@ -1015,12 +1015,13 @@ impl App {
         paths.sort();
 
         // A message per frame only while a Sync/Publish runs or the diff is loading, to
-        // animate their spinners, or while a section folds or a toast comes or goes;
-        // idle, the app draws nothing.
+        // animate their spinners, or while a section folds, a toast comes or goes, or a
+        // change jumped to flashes; idle, the app draws nothing.
         let moving = self.remote_op.is_some()
             || self.diff_loading_for().is_some()
             || self.is_folding()
-            || self.toasts.is_animating(self.now);
+            || self.toasts.is_animating(self.now)
+            || matches!(&self.diff, Some(Ok(diff)) if diff.is_flashing(self.now));
         let spinner = if moving {
             window::frames().map(|_| Message::Tick)
         } else {
